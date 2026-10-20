@@ -5,7 +5,7 @@ cover, per-chapter seek bar, chapter list, sleep timer, and automatic resume.
 
 ## Build
 
-You already have devkitPro. You additionally need three portlibs (cover art decoding):
+You need to have devkitPro. You additionally need three portlibs (cover art decoding):
 
     # devkitPro MSYS2 shell on Windows (use "dkp-pacman" on Linux/macOS)
     pacman -S --needed 3ds-libjpeg-turbo 3ds-libpng 3ds-zlib
@@ -15,11 +15,12 @@ Then, from this folder in the devkitPro shell:
     ./setup_deps.sh      # clones the FAAD2 AAC decoder into deps/faad2 (needs git or curl)
     make
 
-No git? Download https://github.com/knik0/faad2 as a zip and unpack it so that
+If you don't have git you can download https://github.com/knik0/faad2 as a zip and unpack it so that
 `deps/faad2/libfaad/decoder.c` exists, then run `make`.
 
 Output: `narrate.3dsx` (+ `narrate.smdh`). Copy `narrate.3dsx` to `sdmc:/3ds/` on the SD card.
-(Want it on the HOME menu instead? See **Building a CIA** below.)
+
+(If you want it on the HOME menu instead? See **Building a CIA** below.)
 
 ## Use
 
@@ -101,7 +102,7 @@ The `.3dsx` keeps working alongside it; both share `sdmc:/3ds/narrate/` (setting
 One-time setup - two small tools must be on your PATH (the simplest place is `$DEVKITARM/bin`):
 
 * **makerom** - https://github.com/3DSGuy/Project_CTR/releases (get the `makerom-...-windows_x86_64` zip, copy `makerom.exe`)
-* **bannertool** - https://github.com/Steveice10/bannertool/releases (version 1.1.0; copy the `bannertool.exe` for your OS)
+* **bannertool** - https://github.com/Epicpkmn11/bannertool/releases (copy the `bannertool.exe` for your OS)
 
 Then, in the devkitPro shell in this folder:
 
@@ -116,7 +117,7 @@ firmware refuses either, the app falls back to its in-app volume / no screens-of
 
 ## Performance notes (old 2DS / 3DS)
 
-* Audio decoding runs on its own thread (system core on old models, spare core on New 3DS) with ~1.1 s of audio queued,
+* Audio decoding runs on its own thread (system core on old models, spare core on New 3DS, The new 3ds is not tested so i need some feedback) with ~1.1 s of audio queued,
   a short first buffer so sound starts quickly after play/seek, and a lock that the decoder releases within one AAC frame
   so Pause/Seek never wait on a long decode.
 * The UI only redraws when something visible changes (position tick, input, toast ...), and text measuring is cached,
@@ -128,16 +129,8 @@ firmware refuses either, the app falls back to its in-app volume / no screens-of
 ## Troubleshooting
 
 Narrate writes a step-by-step log to `sdmc:/3ds/narrate/log.txt` (overwritten each launch). If it crashes, the
-last line shows how far it got — send that file along with the crash screen.
+last line shows how far it got — you can send that file along with the crash screen, so that I may debug it, when a new issue is reported
 
-## Layout
+## Features/Requests
 
-    source/m4b.c      MP4 demuxer (tables, chapters, tags, cover)           — unit-tested on a PC
-    source/player.c   FAAD2 decode thread -> NDSP streaming, seeking, position tracking
-    source/ui.c       theme-aware citro2d widgets (cards, rows, tabs, bars, icons, text fitting)
-    source/theme.c    UI styles, palettes, accent colours, saved settings
-    source/cover.c    JPEG/PNG cover -> GPU texture + accent colour
-    source/main.c     screens and input
-    source/log.c      crash-proof breadcrumb log
-    source/bookmarks.c per-book bookmarks on the SD card
-    tools/            test_m4b.c + gen_test_m4b.py (host-side demuxer test), make_icon.py
+use the github issue to also report ask for any other/new features you think i should add
