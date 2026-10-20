@@ -3,6 +3,11 @@
 Plays `.m4b` / `.m4a` (AAC) audiobooks with a dark, modern UI: cover art, accent colour taken from the
 cover, per-chapter seek bar, chapter list, sleep timer, and automatic resume.
 
+
+# Fbi install
+
+
+
 ## Build
 
 You need to have devkitPro. You additionally need three portlibs (cover art decoding):
