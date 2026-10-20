@@ -6,7 +6,8 @@ cover, per-chapter seek bar, chapter list, sleep timer, and automatic resume.
 
 # Fbi install
 
-
+![Fbi Install](Narrate.png)
+       
 
 ## Build
 
