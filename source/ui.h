@@ -79,6 +79,9 @@ void  ui_icon_bookmark(float cx, float cy, u32 col, u32 bg);
 void  ui_icon_close(float cx, float cy, float s, u32 col);
 void  ui_icon_screen(float cx, float cy, u32 col, u32 bg);
 void  ui_icon_gear(float cx, float cy, u32 col, u32 bg);
+void  ui_icon_sun(float cx, float cy, float r, u32 col);
+void  ui_icon_sort(float cx, float cy, u32 col);
+void  ui_icon_check(float cx, float cy, float s, u32 col);
 void  ui_icon_folder(float cx, float cy, u32 col);
 void  ui_icon_book(float cx, float cy, u32 col, u32 bg);
 

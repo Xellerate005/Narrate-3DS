@@ -33,6 +33,16 @@ void ui_begin(void) {
 
 void ui_end(void) { C3D_FrameEnd(0); }
 
+// Synthwave: translucent sun and a perspective grid on the horizon (top screen only, static)
+static void decor_grid(void) {
+    u32 hz = C2D_Color32(ui_ar, ui_ag, ui_ab, g_set.dark ? 80 : 100);
+    u32 sun = C2D_Color32(ui_ar, ui_ag, ui_ab, g_set.dark ? 46 : 60);
+    C2D_DrawCircleSolid(200, 178, 64, Z, sun);
+    static const float ys[5] = {186, 198, 212, 228, 246};
+    for (int i = 0; i < 5; i++) C2D_DrawLine(0, ys[i], hz, UI_TOP_W, ys[i], hz, 1.2f, Z);
+    for (int k = -8; k <= 8; k++) C2D_DrawLine(200 + k * 8, 178, hz, 200 + k * 62, UI_SCR_H, hz, 1.0f, Z);
+}
+
 void ui_scene(C3D_RenderTarget *t) {
     C2D_TargetClear(t, ui_pal.bg);
     C2D_SceneBegin(t);
@@ -40,6 +50,7 @@ void ui_scene(C3D_RenderTarget *t) {
         float w = (t == ui_top) ? UI_TOP_W : UI_BOT_W;
         C2D_DrawRectangle(0, 0, Z, w, UI_SCR_H, ui_pal.bg, ui_pal.bg, ui_pal.bg2, ui_pal.bg2);
     }
+    if (ui_style->decor == DECOR_GRID && t == ui_top) decor_grid();
 }
 
 void ui_glow(float w, float h) {
@@ -367,7 +378,7 @@ void ui_play_button(float cx, float cy, int playing, float s) {
         if (playing) ui_icon_pause(cx, cy, 16 * s, ui_pal.text); else ui_icon_play(cx, cy, 18 * s, ui_pal.text);
         break;
     case PLAY_SQUIRCLE:
-        ui_rrect(cx - 34 * s, cy - 34 * s, 68 * s, 68 * s, 24 * s, ui_accent);
+        ui_rrect(cx - 34 * s, cy - 34 * s, 68 * s, 68 * s, ui_style->play_r * s, ui_accent);
         if (playing) ui_icon_pause(cx, cy, 12 * s, ui_pal.on_accent); else ui_icon_play(cx, cy, 13 * s, ui_pal.on_accent);
         break;
     case PLAY_SQUARE:
@@ -552,6 +563,25 @@ void ui_icon_gear(float cx, float cy, u32 col, u32 bg) {
         ui_circle(cx + cosf(a) * 8.0f, cy + sinf(a) * 8.0f, 2.0f, col);
     }
     ui_circle(cx, cy, 3.0f, bg);
+}
+
+void ui_icon_sun(float cx, float cy, float r, u32 col) {
+    ui_circle(cx, cy, r * 0.5f, col);
+    for (int i = 0; i < 8; i++) {
+        float a = (float)i * 0.785398f;
+        ui_line(cx + cosf(a) * r * 0.78f, cy + sinf(a) * r * 0.78f, cx + cosf(a) * r * 1.2f, cy + sinf(a) * r * 1.2f, 1.6f, col);
+    }
+}
+
+void ui_icon_sort(float cx, float cy, u32 col) {
+    ui_rrect(cx - 8, cy - 6, 16, 2.6f, 1.3f, col);
+    ui_rrect(cx - 8, cy - 1.3f, 11, 2.6f, 1.3f, col);
+    ui_rrect(cx - 8, cy + 3.4f, 6, 2.6f, 1.3f, col);
+}
+
+void ui_icon_check(float cx, float cy, float s, u32 col) {
+    ui_line(cx - s * 0.9f, cy, cx - s * 0.25f, cy + s * 0.65f, 2.4f, col);
+    ui_line(cx - s * 0.25f, cy + s * 0.65f, cx + s * 0.95f, cy - s * 0.7f, 2.4f, col);
 }
 
 void ui_icon_folder(float cx, float cy, u32 col) {

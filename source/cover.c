@@ -1,5 +1,8 @@
-// cover.c - JPEG (libjpeg-turbo) and PNG (libpng) cover decoding -> 256x256 RGBA8 texture
+// cover.c - JPEG (libjpeg-turbo) and PNG (libpng) cover decoding -> 256x256 RGBA8 texture,
+// plus the shared orientation (flip / rotate) used by covers and shelf thumbnails.
 #include "cover.h"
+#include "theme.h"
+#include "thumbs.h"
 
 #include <jpeglib.h>
 #include <png.h>
@@ -8,8 +11,7 @@
 #include <string.h>
 #include <math.h>
 
-// The PICA200 stores texture rows bottom-up. If cover art ever shows up upside-down
-// on your console, flip this to 0.
+// The PICA200 stores texture rows bottom-up (see Settings > Cover flip / rotate for the on-screen result).
 #define COVER_FLIP 1
 
 #define TEX_SIZE 256
@@ -21,22 +23,45 @@ static bool g_have;
 static float g_avg[3];
 static int g_flip, g_rot;     // flip: bit0 vertical, bit1 horizontal (as seen on screen); rot: quarter turns
 
-static void apply_orient(void) {
-    // Flips are applied on screen *after* the rotation, so for 90/270 degrees the texture axes swap.
-    int fv = g_flip & 1, fh = (g_flip >> 1) & 1;
-    if (g_rot & 1) { int t = fv; fv = fh; fh = t; }
-    // The base look (flip "None", rotation 0) is the previous build's look: both axes swapped.
-    bool swap_v = !fv, swap_h = !fh;
-    g_sub.top = swap_v ? 0.0f : 1.0f;
-    g_sub.bottom = swap_v ? 1.0f : 0.0f;
-    g_sub.left = swap_h ? 1.0f : 0.0f;
-    g_sub.right = swap_h ? 0.0f : 1.0f;
-}
-
 void cover_set_orient(int flip, int rot) {
     g_flip = flip & 3;
     g_rot = rot & 3;
-    apply_orient();
+}
+
+// Draws any image centred at (cx, cy), honouring the cover flip/rotate settings plus an extra rotation (radians).
+static void draw_img(const C2D_Image *img, float cx, float cy, float size, float extra) {
+    // Flips are applied on screen *after* the rotation, so for 90/270 degrees the texture axes swap.
+    int fv = g_flip & 1, fh = (g_flip >> 1) & 1;
+    if (g_rot & 1) { int t = fv; fv = fh; fh = t; }
+    // The base look (flip "None", rotation 0) has both texture axes swapped.
+    bool swap_v = !fv, swap_h = !fh;
+    Tex3DS_SubTexture st = *img->subtex;
+    st.top = swap_v ? 0.0f : 1.0f;
+    st.bottom = swap_v ? 1.0f : 0.0f;
+    st.left = swap_h ? 1.0f : 0.0f;
+    st.right = swap_h ? 0.0f : 1.0f;
+    C2D_Image tmp = {img->tex, &st};
+
+    C2D_DrawParams p;
+    memset(&p, 0, sizeof p);
+    p.pos.w = size; p.pos.h = size;
+    p.center.x = size / 2; p.center.y = size / 2;       // rotate around the middle of the image...
+    p.pos.x = cx; p.pos.y = cy;                         // ...and citro2d places that centre point at pos
+    p.depth = 0.5f;
+    p.angle = (float)g_rot * 1.57079633f + extra;
+    C2D_DrawImage(tmp, &p, NULL);
+}
+
+void cover_draw_image(const C2D_Image *img, float x, float y, float size) {
+    if (img) draw_img(img, x + size / 2, y + size / 2, size, 0.0f);
+}
+
+void cover_draw(float x, float y, float size) {
+    if (g_have) draw_img(&g_img, x + size / 2, y + size / 2, size, 0.0f);
+}
+
+void cover_draw_centered(float cx, float cy, float size, float extra_rad) {
+    if (g_have) draw_img(&g_img, cx, cy, size, extra_rad);
 }
 
 /* ---------------------------------------------------------------- decoders */
@@ -119,7 +144,25 @@ static inline u32 morton_offset(u32 x, u32 y) {
     return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
 }
 
-bool cover_load(const uint8_t *data, uint32_t len) {
+// rgba: size*size*4 bytes (R,G,B,A), top-down. Creates a swizzled GPU texture.
+bool cover_tex_from_rgba(C3D_Tex *tex, int size, const uint8_t *rgba) {
+    if (!C3D_TexInit(tex, (u16)size, (u16)size, GPU_RGBA8)) return false;
+    u32 *dst = (u32 *)tex->data;
+    for (int y = 0; y < size; y++) {
+        u32 ty = COVER_FLIP ? (u32)(size - 1 - y) : (u32)y;
+        for (int x = 0; x < size; x++) {
+            const u8 *p = rgba + ((size_t)y * size + x) * 4;
+            u32 px = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | 0xFF;
+            dst[(((ty >> 3) * (u32)(size >> 3) + ((u32)x >> 3)) << 6) + morton_offset((u32)x, ty)] = px;
+        }
+    }
+    C3D_TexFlush(tex);
+    C3D_TexSetFilter(tex, GPU_LINEAR, GPU_LINEAR);
+    C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    return true;
+}
+
+bool cover_load(const uint8_t *data, uint32_t len, const char *book_path) {
     cover_free();
     if (!data || len < 16) return false;
 
@@ -129,13 +172,13 @@ bool cover_load(const uint8_t *data, uint32_t len) {
     else if (data[0] == 0x89 && data[1] == 'P') src = decode_png(data, len, &w, &h);
     if (!src || w < 8 || h < 8) { free(src); return false; }
 
-    if (!C3D_TexInit(&g_tex, TEX_SIZE, TEX_SIZE, GPU_RGBA8)) { free(src); return false; }
+    u8 *out = (u8 *)malloc((size_t)TEX_SIZE * TEX_SIZE * 4);
+    if (!out) { free(src); return false; }
 
     // center-crop to a square, box-filter down to 256x256
     int side = w < h ? w : h;
     int sx0 = (w - side) / 2, sy0 = (h - side) / 2;
     double step = (double)side / TEX_SIZE;
-    u32 *dst = (u32 *)g_tex.data;
     double sum[3] = {0, 0, 0};
 
     for (int y = 0; y < TEX_SIZE; y++) {
@@ -156,11 +199,8 @@ bool cover_load(const uint8_t *data, uint32_t len) {
             if (!n) n = 1;
             r /= n; g /= n; b /= n;
             sum[0] += r; sum[1] += g; sum[2] += b;
-
-            u32 px = (r << 24) | (g << 16) | (b << 8) | 0xFF;
-            u32 ty = COVER_FLIP ? (TEX_SIZE - 1 - y) : y;
-            u32 off = (((ty >> 3) * (TEX_SIZE >> 3) + (x >> 3)) << 6) + morton_offset(x, ty);
-            dst[off] = px;
+            u8 *o = out + ((size_t)y * TEX_SIZE + x) * 4;
+            o[0] = (u8)r; o[1] = (u8)g; o[2] = (u8)b; o[3] = 255;
         }
     }
     free(src);
@@ -170,13 +210,15 @@ bool cover_load(const uint8_t *data, uint32_t len) {
     g_avg[1] = (float)(sum[1] / cnt);
     g_avg[2] = (float)(sum[2] / cnt);
 
-    C3D_TexFlush(&g_tex);
-    C3D_TexSetFilter(&g_tex, GPU_LINEAR, GPU_LINEAR);
-    C3D_TexSetWrap(&g_tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+    if (book_path) thumb_save(book_path, out);          // small copy for the library shelf
+
+    bool ok = cover_tex_from_rgba(&g_tex, TEX_SIZE, out);
+    free(out);
+    if (!ok) return false;
 
     g_sub.width = TEX_SIZE;
     g_sub.height = TEX_SIZE;
-    apply_orient();
+    g_sub.left = 0.0f; g_sub.top = 1.0f; g_sub.right = 1.0f; g_sub.bottom = 0.0f;
     g_img.tex = &g_tex;
     g_img.subtex = &g_sub;
     g_have = true;
@@ -191,18 +233,6 @@ void cover_free(void) {
 }
 
 bool cover_ready(void) { return g_have; }
-
-void cover_draw(float x, float y, float size) {
-    if (!g_have) return;
-    C2D_DrawParams p;
-    memset(&p, 0, sizeof p);
-    p.pos.w = size; p.pos.h = size;
-    p.center.x = size / 2; p.center.y = size / 2;       // rotate around the middle of the cover...
-    p.pos.x = x + size / 2; p.pos.y = y + size / 2;     // ...and citro2d places that centre point at pos
-    p.depth = 0.5f;
-    p.angle = (float)g_rot * 1.57079633f;                 // quarter turns in radians
-    C2D_DrawImage(g_img, &p, NULL);
-}
 
 bool cover_accent(u8 *r, u8 *g, u8 *b) {
     if (!g_have) return false;
