@@ -1,0 +1,98 @@
+; ============================================================================
+;  Sea  -  a single-file Narrate theme (.pid): no images, everything is drawn
+;  from shapes. Copy it to  sdmc:/3ds/narrate/themes/  and pick it in
+;  Settings > Custom theme.   See THEMES.md for the full format.
+; ============================================================================
+
+[theme]
+name   = Sea
+author = Narrate
+desc   = Animated waves, a boat that sails as the book progresses and a drifting sun.
+base   = Aquarium            ; inherit button/bar/row shapes from this built-in style
+mode   = both                ; has both a dark and a light palette
+
+[colors.dark]
+bg        = #052B40
+bg2       = #0D6A8C          ; giving bg2 turns the background into a vertical gradient
+surface   = #0B4560
+surface2  = #11607F
+text      = #EAF9FF
+dim       = #8CC9DC
+line      = #1C7898
+accent    = #44E3CB
+on_accent = #04262F
+
+[colors.light]
+bg        = #D2F1FA
+bg2       = #7FCBE3
+surface   = #F0FBFE
+surface2  = #B9E3F0
+text      = #08303F
+dim       = #3F8499
+line      = #9CD0E0
+accent    = #0C9AA6
+on_accent = #FFFFFF
+
+[shape]
+r_card = 16
+r_pill = -1                  ; -1 = fully round
+bar_h  = 6
+play   = circle
+btn    = filled
+knob   = glow
+
+; ---------------------------------------------------------------- top screen (400 x 240)
+[top]
+; the sun drifts across the sky while the book progresses, and pulses gently
+circle 60 40 24 #FFE29A55 follow=book to=340,40 pulse=0.10,3200
+circle 60 40 13 #FFEBBA   follow=book to=340,40
+
+; cover + text
+cover  18 48 112
+text   title     146 50  w=236 size=0.70 lines=2 color=text
+text   artist    146 98  w=236 size=0.44 color=dim
+text   chapter   146 120 w=236 size=0.46 color=accent
+text   elapsed   146 138 size=0.95 color=text
+text   remaining 382 150 size=0.50 align=right color=dim
+
+; water body + three wave layers moving at different speeds / directions (they only move while playing)
+rect 0 182 400 58 #0A5370AA
+wave 0 178 400 amp=7 len=90 speed=24  color=#1C86A8AA width=4
+wave 0 192 400 amp=6 len=60 speed=-36 color=#2AA5C4CC width=4
+wave 0 208 400 amp=5 len=44 speed=52  color=#3FD0DDDD width=4
+
+; boat made from shapes: every part has the same follow/bob so it moves as one piece
+rect 18 168 36 9 #F3E4BC radius=3 follow=book to=330,168 bob=2.5,1600
+line 36 138 36 168 #CFC3A0 width=2 follow=book to=348,138 bob=2.5,1600
+line 38 140 58 164 #FFFFFF width=2 follow=book to=350,140 bob=2.5,1600
+line 58 164 38 164 #FFFFFF width=2 follow=book to=350,164 bob=2.5,1600
+
+bar book 18 228 364 5 color=accent bg=surface2
+status
+
+; --------------------------------------------------------------- bottom screen (320 x 240)
+[bottom]
+wave 0 226 320 amp=4 len=70 speed=20 color=#2AA5C455 width=3
+
+text chapnum 160 10 size=0.36 align=center color=accent
+text chapter 160 24 w=200 size=0.52 align=center color=text
+
+seek 12 48 296 44
+text elapsed   24 80 size=0.42 color=dim
+text remaining 296 80 size=0.42 align=right color=dim
+
+button prev 8   108 54 54 style=round
+button back 68  110 50 50 style=round
+button play 122 96  76 72 style=round color=accent
+button fwd  202 110 50 50 style=round
+button next 258 108 54 54 style=round
+
+bright 40 168 240 18
+
+button chapters 8   190 74 36 style=pill label="Chapters"
+button sleep    86  190 74 36 style=pill label="$sleep"
+button speed    164 190 74 36 style=pill label="$speed"
+button settings 242 190 70 36 style=pill label="More"
+
+button screen_off 9   5 34 34 style=round
+button bookmark   277 5 34 34 style=round
