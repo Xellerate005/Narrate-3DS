@@ -13,7 +13,9 @@
 #include "bookmarks.h"
 #include "browser.h"
 #include "cover.h"
+#include "custom.h"
 #include "decks.h"
+#include "iowork.h"
 #include "thumbs.h"
 #include "log.h"
 #include "m4b.h"
@@ -25,6 +27,10 @@
 // Leave most of the app memory for the heap (chapter tables of long books); the linear heap
 // only needs room for GPU buffers, cover art and audio buffers.
 u32 __ctru_linear_heap_size = 10 * 1024 * 1024;
+
+#ifndef SYSCLOCK_ARM11
+#define SYSCLOCK_ARM11 268111856ULL
+#endif
 
 #define LIB_ROOT  "sdmc:/AudioBook"
 #define DATA_DIR  "sdmc:/3ds/narrate"
@@ -48,8 +54,13 @@ u32 __ctru_linear_heap_size = 10 * 1024 * 1024;
 #define GEAR_X    294
 #define SORT_X    258
 
-static const int BTN_X[5]  = {36, 94, 160, 226, 284};   // prev ch, back, play, forward, next ch
-static const int PILL_X[3] = {8, 112, 216};
+
+// Newer libctru renamed the hardware volume-slider call; build with -DNARRATE_OLD_MCU_NAME for older versions.
+#ifdef NARRATE_OLD_MCU_NAME
+#define MCU_SLIDER_LEVEL MCUHWC_GetSoundSliderLevel
+#else
+#define MCU_SLIDER_LEVEL MCUHWC_GetVolumeSliderLevel
+#endif
 
 typedef enum { S_LIB, S_PLAYER, S_CHAPTERS, S_SETTINGS } State;
 
@@ -91,11 +102,20 @@ static u64      g_toast_until;
 static char     g_cont_path[800];
 static bool     g_have_cont;
 static int      g_set_sel, g_set_scroll;
+static int      g_anim_div = 2;                 // animated top screen is drawn every N vblanks (1 = 60 fps, 2 = 30, 4 = 15)
+static float    g_cpu_ms_ema, g_period_ms_ema;  // measured cost / spacing of animated frames
+static u64      g_adapt_t, g_adapt_hold, g_last_anim_draw;
 static bool     g_lid_blocked, g_bright_known, g_bright_drag;
 static int      g_bright_pct = 100;
 static u32      g_orig_bright[2];
 static M4b      g_sample;             // fake book used for the live preview in Settings
 static M4bChapter g_sample_ch[6];
+static u64      g_last_input;       // for "screen off after N seconds"
+static u64      g_paused_at;        // when playback was last paused (smart rewind)
+static float    g_vu_l, g_vu_r;     // smoothed VU levels
+static const int SPEEDS[] = {80, 90, 100, 110, 125, 150};
+#define NSPEEDS ((int)(sizeof SPEEDS / sizeof SPEEDS[0]))
+static int      g_cust_idx = -1;    // index into the scanned theme list for the Settings row (-1 = none)
 static u64      g_save_at;          // deferred progress save (keeps button presses snappy)
 static u64      g_stats_log;
 static u64      g_active_until;     // keep redrawing at full rate while the user is interacting
@@ -170,7 +190,7 @@ static void update_status(u64 now) {
     if (g_mcu_ok && now - g_slider_check >= 80) {
         g_slider_check = now;
         u8 v = 0;
-        if (R_SUCCEEDED(MCUHWC_GetSoundSliderLevel(&v))) {
+        if (R_SUCCEEDED(MCU_SLIDER_LEVEL(&v))) {
             if (!g_slider_ok) { g_slider_ok = true; g_slider = v; }
             else if (v != g_slider) {
                 g_slider = v;
@@ -204,7 +224,7 @@ static void apply_volume(float fade) {
 
 /* ----------------------------------------- bottom-screen layouts: hit areas */
 
-enum { A_NONE, A_PLAY, A_BACK, A_FWD, A_PREV, A_NEXT, A_CHAPTERS, A_SLEEP, A_SETTINGS, A_BOOKMARK, A_SCREEN_OFF };
+enum { A_NONE, A_PLAY, A_BACK, A_FWD, A_PREV, A_NEXT, A_CHAPTERS, A_SLEEP, A_SETTINGS, A_BOOKMARK, A_SCREEN_OFF, A_SPEED };   // same order as the theme files' ACT_*
 typedef struct { int act; short x, y, w, h; } Hit;
 enum { BF_CLASSIC, BF_BIG, BF_NIGHT, BF_ZEN, BF_DECK, BF_COUNT };
 typedef struct { const Hit *hits; int n; short seek[4]; short bright[4]; } BDef;
@@ -418,6 +438,9 @@ static void open_book(const char *path) {
     if (progress_get(path, &pos, &dur) && pos > 0 && pos + 5000 < total) {
         player_seek_ms(pos > 3000 ? pos - 3000 : pos);   // rewind a little so you get your bearings
     }
+    player_set_speed(g_set.speed);
+    player_set_loud(g_set.loud);
+    if (g_set.autochap) { static const int MIN[] = {0, 5, 10, 15, 30}; player_autochap(MIN[g_set.autochap]); }
     player_play();
     g_state = S_PLAYER;
     g_cur_ch = m4b_chapter_at(g_book, player_position_ms());
@@ -428,9 +451,24 @@ static void open_book(const char *path) {
 
 /* --------------------------------------------------------- playback actions */
 
+// The longer playback was paused, the further back it picks up again.
+static int smart_rewind_ms(u64 now) {
+    if (!g_set.smartrewind || !g_paused_at) return 0;
+    u64 s = (now - g_paused_at) / 1000;
+    return s < 30 ? 0 : s < 300 ? 3000 : s < 3600 ? 8000 : 15000;
+}
+
 static void do_toggle(void) {
-    if (player_is_playing()) { player_pause(); g_save_at = osGetTime() + 500; }
-    else player_play();
+    u64 now = osGetTime();
+    if (player_is_playing()) { player_pause(); g_paused_at = now; g_save_at = now + 500; }
+    else {
+        int rw = smart_rewind_ms(now);
+        if (rw > 0) {
+            uint64_t pos = player_position_ms();
+            player_seek_ms(pos > (uint64_t)rw ? pos - (uint64_t)rw : 0);
+        }
+        player_play();
+    }
 }
 
 static void seek_rel(int64_t delta) {
@@ -500,7 +538,10 @@ static void tick_playback(u64 now) {
     if (player_is_playing() && now - g_stats_log > 30000) {
         PlayerStats ps;
         player_get_stats(&ps);
-        if (g_stats_log) nlog("audio stats: decode load %d%% (peak %d%%), underruns %u, new3ds=%d", ps.load_pct, ps.peak_pct, ps.underruns, (int)ps.is_new3ds);
+        if (g_stats_log) {
+            nlog_async("audio stats: decode load %d%% (peak %d%%), underruns %u, new3ds=%d", ps.load_pct, ps.peak_pct, ps.underruns, (int)ps.is_new3ds);
+            if (g_cpu_ms_ema > 0) nlog_async("anim stats: %d fps target, draw cpu %.1f ms, frame spacing %.1f ms", 60 / g_anim_div, (double)g_cpu_ms_ema, (double)g_period_ms_ema);
+        }
         g_stats_log = now;
     }
 
@@ -525,10 +566,14 @@ static void tick_playback(u64 now) {
 /* ------------------------------------------------------------ drawing: shared */
 
 static void draw_status(void) {
+    static time_t clk_t;
+    static char clk[16] = "--:--";
     time_t t = time(NULL);
-    struct tm *lt = localtime(&t);
-    char clk[16] = "--:--";
-    if (lt) strftime(clk, sizeof clk, "%H:%M", lt);
+    if (t != clk_t) {
+        clk_t = t;
+        struct tm *lt = localtime(&t);
+        if (lt) strftime(clk, sizeof clk, "%H:%M", lt);
+    }
     ui_text(clk, 364, 6, 0.42f, UI_DIM, UI_RIGHT);
 
     // battery
@@ -683,7 +728,19 @@ static void top_zen(const TopData *t) {
 }
 
 // Draws the whole top screen for the active layout. 'preview' = settings preview (sample data, always animating).
+static void sleep_label(char *s, size_t n, u64 now);
+static void ctx_from_top(CLCtx *c, const TopData *t, u64 now);
+
 static void draw_top(const TopData *t, u64 now, bool preview) {
+    if (custom_has_top()) {                                   // a custom theme draws the whole screen itself
+        CLCtx c;
+        ctx_from_top(&c, t, now);
+        ui_scene(ui_top);
+        custom_draw_top(&c);
+        if (!preview) draw_sleep_hint(now);
+        draw_toast(now);
+        return;
+    }
     int lay = theme_layout();
     if (lay == LAY_CLASSIC) {
         Np np = {t->book->title, t->book->artist, t->book->chapters[t->ch].title, t->ch, t->book->nchapters, t->frac, t->left_ms};
@@ -692,7 +749,7 @@ static void draw_top(const TopData *t, u64 now, bool preview) {
     }
     ui_scene(ui_top);
     ui_glow(UI_TOP_W, 150);
-    DeckInfo d = {t->book, t->ch, t->frac, t->left_ms, t->elapsed, t->clen, t->playing, now};
+    DeckInfo d = {t->book, t->ch, t->frac, t->left_ms, t->elapsed, t->clen, t->playing, now, g_vu_l, g_vu_r};
     switch (lay) {
     case LAY_BIG: top_big(t); break;
     case LAY_NIGHT: top_night(t); break;
@@ -700,11 +757,54 @@ static void draw_top(const TopData *t, u64 now, bool preview) {
     case LAY_CASSETTE: deck_cassette(&d); break;
     case LAY_REEL: deck_reel(&d); break;
     case LAY_VINYL: deck_vinyl(&d); break;
+    case LAY_AMP: deck_amp(&d); break;
+    case LAY_BOOK: deck_book(&d); break;
+    case LAY_JOURNEY: deck_journey(&d); break;
+    case LAY_CAMPFIRE: deck_campfire(&d); break;
+    case LAY_NIGHTSKY: deck_nightsky(&d); break;
+    case LAY_AQUARIUM: deck_aquarium(&d); break;
+    case LAY_CRT: deck_crt(&d); break;
     default: deck_quest(&d); break;
     }
     draw_status();
     if (!preview) draw_sleep_hint(now);
     draw_toast(now);
+}
+
+static void ctx_from_top(CLCtx *c, const TopData *t, u64 now) {
+    memset(c, 0, sizeof *c);
+    const M4b *b = t->book;
+    c->title = b->title;
+    c->artist = b->artist;
+    c->chapter = b->chapters[t->ch].title ? b->chapters[t->ch].title : "";
+    int hrs = t->clen >= 3600000;
+    ui_fmt_time(c->elapsed, sizeof c->elapsed, t->elapsed, hrs);
+    char tmp[16];
+    ui_fmt_time(tmp, sizeof tmp, t->clen > t->elapsed ? t->clen - t->elapsed : 0, hrs);
+    snprintf(c->remaining, sizeof c->remaining, "-%s", tmp);
+    fmt_left(c->left, sizeof c->left, t->left_ms);
+    snprintf(c->percent, sizeof c->percent, "%d%%", (int)(t->frac * 100.0f + 0.5f));
+    snprintf(c->chapnum, sizeof c->chapnum, "Chapter %d of %d", t->ch + 1, b->nchapters > 0 ? b->nchapters : 1);
+    time_t tt = time(NULL);
+    struct tm *lt = localtime(&tt);
+    if (lt) snprintf(c->clock, sizeof c->clock, "%02d:%02d", lt->tm_hour, lt->tm_min);
+    snprintf(c->speed, sizeof c->speed, "%d.%02dx", g_set.speed / 100, g_set.speed % 100);
+    sleep_label(c->sleep, sizeof c->sleep, now);
+    snprintf(c->volume, sizeof c->volume, "%d", volume_level10());
+    c->frac_book = t->frac;
+    c->frac_chapter = t->clen ? (float)((double)t->elapsed / (double)t->clen) : 0;
+    if (c->frac_chapter > 1) c->frac_chapter = 1;
+    c->seek_frac = g_seeking ? g_seek_frac : c->frac_chapter;
+    c->playing = t->playing;
+    c->has_cover = cover_ready();
+    c->seeking = g_seeking;
+    c->lcd_ok = g_lcd_ok;
+    c->sleeping = g_sleep_mode != 0;
+    c->bright_pct = g_bright_pct;
+    c->now = now;
+    c->vu_l = g_vu_l;
+    c->vu_r = g_vu_r;
+    c->status = draw_status;
 }
 
 static void draw_player_top(uint64_t pos, u64 now) {
@@ -974,6 +1074,18 @@ static void draw_bottom_deck(uint64_t pos, u64 now) {
 }
 
 static void draw_player_bottom(uint64_t pos, u64 now) {
+    if (custom_has_bottom()) {
+        uint64_t dur = player_duration_ms();
+        uint64_t cs = ch_start(g_cur_ch), ce = ch_end(g_cur_ch);
+        uint64_t shown = g_seeking ? cs + (uint64_t)(g_seek_frac * (float)(ce > cs ? ce - cs : 0)) : pos;
+        TopData t = {g_book, g_cur_ch, dur ? (float)((double)pos / (double)dur) : 0, dur > pos ? dur - pos : 0,
+                     shown > cs ? shown - cs : 0, ce > cs ? ce - cs : 1, player_is_playing()};
+        CLCtx c;
+        ctx_from_top(&c, &t, now);
+        ui_scene(ui_bot);
+        custom_draw_bottom(&c);
+        return;
+    }
     switch (bottom_family(theme_layout())) {
     case BF_BIG: draw_bottom_big(pos, now); break;
     case BF_NIGHT: draw_bottom_night(pos, now); break;
@@ -1384,7 +1496,7 @@ static void draw_library_bottom(void) {
 
 /* ------------------------------------------------------------ drawing: settings */
 
-#define SET_ROWS 13
+#define SET_ROWS 19
 #define SET_VIS  8
 #define SET_ROW_Y 32
 #define SET_ROW_H 26
@@ -1392,19 +1504,40 @@ static void draw_library_bottom(void) {
 static void set_value_text(int row, char *out, size_t n) {
     static const char *FLIPS[4] = {"None", "Vertical", "Horizontal", "Both"};
     switch (row) {
-    case 0: snprintf(out, n, "%s", theme_style_name(g_set.style)); break;
+    case 0: snprintf(out, n, "%s", custom_active() ? "(custom theme)" : theme_style_name(g_set.style)); break;
     case 1: snprintf(out, n, "%s", theme_layout_name(g_set.layout)); break;
     case 2: snprintf(out, n, "%s", theme_view_name(g_set.libview)); break;
     case 3: snprintf(out, n, "%s", g_set.dark ? "Dark" : "Light"); break;
     case 4: snprintf(out, n, "%s", theme_accent_name(g_set.accent)); break;
     case 5: snprintf(out, n, "%s", g_set.icons == 0 ? "Style default" : g_set.icons == 1 ? "Solid" : "Outline"); break;
-    case 6: snprintf(out, n, "%s", g_set.anim ? "On" : "Off"); break;
+    case 6: {
+        static const char *AN[5] = {"Off", "Auto", "15 fps", "30 fps", "60 fps"};
+        snprintf(out, n, "%s", AN[g_set.anim]);
+        break;
+    }
     case 7: snprintf(out, n, "%d s", SKIP_BACK_OPTS[g_set.skip_back]); break;
     case 8: snprintf(out, n, "%d s", SKIP_FWD_OPTS[g_set.skip_fwd]); break;
     case 9: snprintf(out, n, "%s", FLIPS[g_set.cover_flip & 3]); break;
     case 10: snprintf(out, n, "%d deg", 90 * (g_set.cover_rot & 3)); break;
     case 11: snprintf(out, n, "%s", g_set.lidplay ? "On" : "Off"); break;
-    default: snprintf(out, n, "%s", g_set.autocont ? "On" : "Off"); break;
+    case 12: snprintf(out, n, "%s", g_set.autocont ? "On" : "Off"); break;
+    case 13:
+        if (!custom_active()) snprintf(out, n, "None%s", custom_count() ? "" : " found");
+        else snprintf(out, n, "%s", custom_name());
+        break;
+    case 14: snprintf(out, n, "%d%%", g_set.speed); break;
+    case 15: snprintf(out, n, "%s", g_set.loud == 0 ? "Off" : g_set.loud == 1 ? "+3 dB" : "+6 dB"); break;
+    case 16: snprintf(out, n, "%s", g_set.smartrewind ? "On" : "Off"); break;
+    case 17: {
+        static const char *D[5] = {"Off", "15 s", "30 s", "60 s", "2 min"};
+        snprintf(out, n, "%s", D[g_set.dim_after]);
+        break;
+    }
+    default: {
+        static const char *A[5] = {"Off", "5 min", "10 min", "15 min", "30 min"};
+        snprintf(out, n, "%s", A[g_set.autochap]);
+        break;
+    }
     }
 }
 
@@ -1416,13 +1549,42 @@ static void set_change(int row, int dir) {
     case 3: g_set.dark = !g_set.dark; break;
     case 4: g_set.accent = (g_set.accent + dir + ACCENT_COUNT) % ACCENT_COUNT; break;
     case 5: g_set.icons = (g_set.icons + dir + 3) % 3; break;
-    case 6: g_set.anim = !g_set.anim; break;
+    case 6: g_set.anim = (g_set.anim + dir + 5) % 5; break;
     case 7: g_set.skip_back = (g_set.skip_back + dir + 3) % 3; break;
     case 8: g_set.skip_fwd = (g_set.skip_fwd + dir + 3) % 3; break;
     case 9: g_set.cover_flip = (g_set.cover_flip + dir + 4) % 4; break;
     case 10: g_set.cover_rot = (g_set.cover_rot + dir + 4) % 4; break;
     case 11: g_set.lidplay = !g_set.lidplay; break;
-    default: g_set.autocont = !g_set.autocont; break;
+    case 12: g_set.autocont = !g_set.autocont; break;
+    case 13: {
+        int n = custom_count();
+        if (n == 0) { set_msg("No themes in sdmc:/3ds/narrate/themes"); break; }
+        g_cust_idx = (g_cust_idx + dir + n + 1 + 1) % (n + 1) - 1;       // -1 = none, 0..n-1 = a theme file
+        char msg[120] = "";
+        if (g_cust_idx < 0) {
+            custom_unapply();
+            g_set.custom[0] = 0;
+        } else if (custom_apply(custom_file(g_cust_idx), msg, sizeof msg)) {
+            snprintf(g_set.custom, sizeof g_set.custom, "%s", custom_file(g_cust_idx));
+        } else {
+            custom_unapply();
+            g_set.custom[0] = 0;
+            g_cust_idx = -1;
+        }
+        if (msg[0]) set_msg(msg);
+        break;
+    }
+    case 14: {
+        int i = 0;
+        while (i < NSPEEDS - 1 && SPEEDS[i] < g_set.speed) i++;
+        g_set.speed = SPEEDS[(i + dir + NSPEEDS) % NSPEEDS];
+        player_set_speed(g_set.speed);
+        break;
+    }
+    case 15: g_set.loud = (g_set.loud + dir + 3) % 3; player_set_loud(g_set.loud); break;
+    case 16: g_set.smartrewind = !g_set.smartrewind; break;
+    case 17: g_set.dim_after = (g_set.dim_after + dir + 5) % 5; break;
+    default: g_set.autochap = (g_set.autochap + dir + 5) % 5; break;
     }
     cover_set_orient(g_set.cover_flip, g_set.cover_rot);
     theme_apply();
@@ -1431,6 +1593,9 @@ static void set_change(int row, int dir) {
 }
 
 static void open_settings(State from) {
+    custom_scan();                                    // pick up theme files copied to the SD card since last time
+    g_cust_idx = -1;
+    for (int i = 0; i < custom_count(); i++) if (custom_active() && !strcmp(custom_file(i), custom_active_file())) g_cust_idx = i;
     g_settings_from = from;
     g_set_sel = 0;
     g_set_scroll = 0;
@@ -1444,7 +1609,8 @@ static void draw_settings_top(u64 now) {
 
 static void draw_settings_bottom(void) {
     static const char *LABELS[SET_ROWS] = {"Style", "Layout", "Library view", "Appearance", "Accent", "Icons", "Animations",
-                                           "Skip back", "Skip forward", "Cover flip", "Cover rotate", "Lid-closed play", "Auto-next book"};
+                                           "Skip back", "Skip forward", "Cover flip", "Cover rotate", "Lid-closed play", "Auto-next book",
+                                           "Custom theme", "Playback speed", "Loudness boost", "Smart rewind", "Screen off after", "Auto chapters"};
     ui_scene(ui_bot);
     ui_back_button(8, 3, 64, 26);
     ui_text("Settings", 84, 7, 0.55f, UI_TEXT, UI_LEFT);
@@ -1732,15 +1898,29 @@ static void update_settings(u32 kd, u32 kh, u32 ku, touchPosition tp) {
     }
 }
 
+// Touch areas of the current bottom screen: a custom theme supplies its own (none = zero-sized, never hit).
+static const short *seek_rect(short *tmp) {
+    if (custom_has_bottom()) { tmp[0] = tmp[1] = tmp[2] = tmp[3] = 0; custom_seek_rect(tmp); return tmp; }
+    return BD[bottom_family(theme_layout())].seek;
+}
+
+static const short *bright_rect(short *tmp) {
+    if (custom_has_bottom()) { tmp[0] = tmp[1] = tmp[2] = tmp[3] = 0; custom_bright_rect(tmp); return tmp; }
+    return BD[bottom_family(theme_layout())].bright;
+}
+
 static void seek_from_touch(int px) {
-    const BDef *bd = &BD[bottom_family(theme_layout())];
-    float x0 = bd->seek[0] + SEEK_PAD, w = bd->seek[2] - 2 * SEEK_PAD;
+    short tmp[4];
+    const short *sr = seek_rect(tmp);
+    float x0 = sr[0] + SEEK_PAD, w = sr[2] - 2 * SEEK_PAD;
+    if (w < 1) return;
     float f = (px - x0) / w;
     g_seek_frac = f < 0 ? 0 : f > 1 ? 1 : f;
 }
 
 static void bright_from_touch(int px) {
-    const short *r = BD[bottom_family(theme_layout())].bright;
+    short tmp[4];
+    const short *r = bright_rect(tmp);
     float x0 = r[0] + 30, w = r[2] - 68;
     float f = (px - x0) / w;
     f = f < 0 ? 0 : f > 1 ? 1 : f;
@@ -1761,6 +1941,14 @@ static void do_action(int act) {
     case A_SETTINGS: open_settings(S_PLAYER); break;
     case A_BOOKMARK: add_bookmark(); break;
     case A_SCREEN_OFF: screen_off(true); break;
+    case A_SPEED: {
+        int i = 0;
+        while (i < NSPEEDS - 1 && SPEEDS[i] < g_set.speed) i++;
+        g_set.speed = SPEEDS[(i + 1) % NSPEEDS];
+        player_set_speed(g_set.speed);
+        theme_save();
+        break;
+    }
     default: break;
     }
 }
@@ -1780,16 +1968,17 @@ static void update_player(u32 kd, u32 kh, u32 ku, touchPosition tp) {
 
     if (kd & KEY_TOUCH) {
         int fam = bottom_family(theme_layout());
-        const BDef *bd = &BD[fam];
+        short st[4], bt[4];
+        const short *sr = seek_rect(st), *br = bright_rect(bt);
         int x = tp.px, y = tp.py;
-        if (in_rect(x, y, bd->seek[0], bd->seek[1], bd->seek[2], bd->seek[3])) {
+        if (sr[2] > 0 && in_rect(x, y, sr[0], sr[1], sr[2], sr[3])) {
             g_seeking = true;
             seek_from_touch(x);
-        } else if (g_lcd_ok && in_rect(x, y, bd->bright[0], bd->bright[1], bd->bright[2], bd->bright[3])) {
+        } else if (g_lcd_ok && br[2] > 0 && in_rect(x, y, br[0], br[1], br[2], br[3])) {
             g_bright_drag = true;
             bright_from_touch(x);
         } else {
-            int act = hit_test(fam, x, y);
+            int act = custom_has_bottom() ? custom_hit(x, y) : hit_test(fam, x, y);
             if (act == A_SETTINGS) { open_settings(S_PLAYER); return; }
             do_action(act);
         }
@@ -1812,6 +2001,7 @@ int main(void) {
     osSetSpeedupEnable(true);
     mkdir("sdmc:/3ds", 0777);
     mkdir(DATA_DIR, 0777);
+    iowork_init();
     log_reset();
     nlog("Narrate starting");
     gfxInitDefault();
@@ -1821,6 +2011,12 @@ int main(void) {
     theme_load();
     cover_set_orient(g_set.cover_flip, g_set.cover_rot);
     ui_init();
+    custom_scan();
+    if (g_set.custom[0]) {                                  // re-apply the custom theme chosen last time
+        char msg[120] = "";
+        if (!custom_apply(g_set.custom, msg, sizeof msg)) { nlog("custom theme failed: %s", msg); custom_unapply(); g_set.custom[0] = 0; }
+        theme_apply();
+    }
     nlog("ui ready; app mem free=%lu, linear free=%lu", (unsigned long)osGetMemRegionFree(MEMREGION_APPLICATION), (unsigned long)linearSpaceFree());
 
     g_lcd_ok = R_SUCCEEDED(gspLcdInit());
@@ -1862,6 +2058,16 @@ int main(void) {
 
         u64 now = osGetTime();
         update_status(now);
+        if (kd || (kh & KEY_TOUCH) || !g_last_input) g_last_input = now;
+        if (g_set.dim_after && !g_screen_off && g_state == S_PLAYER && g_book && player_is_playing() && !g_seeking &&
+            now - g_last_input > (u64)(g_set.dim_after == 1 ? 15000 : g_set.dim_after == 2 ? 30000 : g_set.dim_after == 3 ? 60000 : 120000))
+            screen_off(true);
+        {   // VU meters: instant attack, smooth release
+            float l, r;
+            player_get_level(&l, &r);
+            g_vu_l = l > g_vu_l ? l : g_vu_l * 0.86f;
+            g_vu_r = r > g_vu_r ? r : g_vu_r * 0.86f;
+        }
 
         if (g_screen_off) {
             if (kd || (kh & KEY_TOUCH)) screen_off(false);
@@ -1882,17 +2088,27 @@ int main(void) {
             continue;
         }
 
-        // Only redraw when something visible changed (or while the user is interacting). On the old 2DS/3DS
-        // this frees a lot of CPU/GPU time for the audio decoder. Animated layouts redraw just the top screen
-        // at a low frame rate (the bottom screen keeps its last image).
+        // ---- what needs drawing this vblank? ----
+        // Only redraw when something visible changed (or while the user is interacting): this frees a lot of CPU/GPU
+        // time for the audio decoder on the old 2DS/3DS. Animated layouts redraw only the top screen, on a fixed
+        // vblank cadence (every 1st/2nd/4th refresh = 60/30/15 fps, so frames are evenly spaced). Everything else
+        // (the bottom screen's clock/progress updates) is drawn in the spare refreshes in between, so the animation
+        // never hitches when the time label changes.
         if (kh || kd || ku) g_active_until = now + 350;
         uint64_t spos = g_book ? player_position_ms() : 0;
         int lay = theme_layout();
-        bool animated_layout = (lay == LAY_CASSETTE || lay == LAY_VINYL || lay == LAY_REEL);
-        bool anim_on = g_set.anim && animated_layout &&
+        bool animated_layout = custom_has_top() ? custom_top_animated() : (lay == LAY_CASSETTE || lay == LAY_VINYL || lay == LAY_REEL || lay >= LAY_AMP);
+        bool anim_on = g_set.anim != 0 && animated_layout &&
                        (g_state == S_SETTINGS || (g_book && player_is_playing() && (g_state == S_PLAYER || g_state == S_CHAPTERS)));
-        u64 interval = player_is_new3ds() ? 42 : 83;          // ~24 fps on New 3DS, ~12 fps on the old models
-        u64 atick = anim_on ? now / interval : 0;
+        static unsigned vb;
+        vb++;
+        int min_div = player_is_new3ds() ? 1 : 2;               // the old 2DS/3DS tops out at 30 fps in Auto
+        int div = g_anim_div;
+        if (g_set.anim == 2) div = 4;
+        else if (g_set.anim == 3) div = 2;
+        else if (g_set.anim == 4) div = 1;
+        else if (div < min_div) div = g_anim_div = min_div;
+        bool anim_slot = anim_on && (vb % (unsigned)div == 0);
 
         u64 sig = 1469598103934665603ULL;
 #define MIX(v) sig = (sig ^ (u64)(v)) * 1099511628211ULL
@@ -1901,31 +2117,72 @@ int main(void) {
         MIX(now < g_toast_until); MIX(now < g_msg_until); MIX(g_slider); MIX(g_batt); MIX(g_charging);
         MIX(g_nbm); MIX((u64)time(NULL) / 60); MIX(g_seeking); MIX(g_bright_pct); MIX(lay);
 #undef MIX
-        static u64 last_sig, last_atick, last_full;
-        bool bot_dirty = (sig != last_sig) || now < g_active_until || now - last_full >= 1000;
-        bool top_dirty = bot_dirty || (anim_on && atick != last_atick);
-        if (!top_dirty) {
+        static u64 last_sig, last_full;
+        static bool top_pending, bot_pending;
+        if (sig != last_sig || now < g_active_until || now - last_full >= 1000) {
+            last_sig = sig;
+            last_full = now;
+            top_pending = bot_pending = true;
+        }
+
+        bool draw_top, draw_bot;
+        if (anim_on) {
+            draw_top = anim_slot;
+            draw_bot = bot_pending && (now < g_active_until || !anim_slot || div == 1);
+        } else {
+            draw_top = top_pending;
+            draw_bot = bot_pending;
+        }
+        if (!draw_top && !draw_bot) {
             gspWaitForVBlank();
             continue;
         }
-        if (bot_dirty) { last_sig = sig; last_full = now; }
-        last_atick = atick;
+        if (draw_top) top_pending = false;
+        if (draw_bot) bot_pending = false;
 
         ui_begin();
+        u64 t0 = svcGetSystemTick();
         if (g_state == S_SETTINGS) {
-            draw_settings_top(now);
-            if (bot_dirty) draw_settings_bottom();
+            if (draw_top) draw_settings_top(now);
+            if (draw_bot) draw_settings_bottom();
         } else if (g_state == S_LIB || !g_book) {
-            draw_library_top(now);
-            if (bot_dirty) draw_library_bottom();
+            if (draw_top) draw_library_top(now);
+            if (draw_bot) draw_library_bottom();
         } else {
-            draw_player_top(spos, now);
-            if (bot_dirty) {
+            if (draw_top) draw_player_top(spos, now);
+            if (draw_bot) {
                 if (g_state == S_CHAPTERS) draw_lists_bottom(spos);
                 else draw_player_bottom(spos, now);
             }
         }
+        u64 t1 = svcGetSystemTick();
         ui_end();
+        if (thumbs_pending()) g_active_until = now + 120;     // some shelf thumbnails are still loading: draw again soon
+
+        // ---- measure animated top-only frames and (in Auto) adapt the frame rate to what the console can do ----
+        if (anim_on && draw_top && !draw_bot) {
+            float cpu_ms = (float)((double)(t1 - t0) * 1000.0 / (double)SYSCLOCK_ARM11);
+            g_cpu_ms_ema = g_cpu_ms_ema > 0 ? g_cpu_ms_ema * 0.9f + cpu_ms * 0.1f : cpu_ms;
+            if (g_last_anim_draw && now - g_last_anim_draw < 500) {
+                float period = (float)(now - g_last_anim_draw);
+                g_period_ms_ema = g_period_ms_ema > 0 ? g_period_ms_ema * 0.9f + period * 0.1f : period;
+            }
+            g_last_anim_draw = now;
+            if (g_set.anim == 1 && now - g_adapt_t >= 2000) {
+                g_adapt_t = now;
+                float expected = (float)div * 16.7f;
+                if (g_period_ms_ema > expected * 1.35f && g_anim_div < 4) {          // can't keep up: slow down and stay slow a while
+                    g_anim_div++;
+                    g_adapt_hold = now + 20000;
+                    g_period_ms_ema = 0;
+                } else if (now > g_adapt_hold && g_cpu_ms_ema < expected * 0.30f && g_anim_div > min_div) {   // plenty of headroom: speed up
+                    g_anim_div--;
+                    g_period_ms_ema = 0;
+                }
+            }
+        } else if (!anim_on) {
+            g_last_anim_draw = 0;
+        }
         if (thumbs_pending()) g_active_until = now + 120;     // some shelf thumbnails are still loading: draw again soon
     }
 
@@ -1934,6 +2191,9 @@ int main(void) {
     restore_brightness();
     aptSetSleepAllowed(true);
     player_exit();
+    progress_save();
+    iowork_exit();                // write everything that is still queued
+    custom_unapply();
     cover_free();
     thumbs_exit();
     browser_free(&g_br);

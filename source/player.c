@@ -1,6 +1,7 @@
 // player.c - AAC decoding (FAAD2) on a worker thread, streamed to NDSP channel 0.
 #include "player.h"
 #include "log.h"
+#include "wsola.h"
 
 #include <3ds.h>
 #include <stdlib.h>
@@ -67,7 +68,15 @@ static u32           g_channels = 2;
 static ndspWaveBuf   g_wb[NBUF];
 static s16          *g_pcm[NBUF];
 static u64           g_buf_ms[NBUF];
-static u32           g_buf_dur[NBUF];
+static u32           g_buf_dur[NBUF];          // real time the buffer takes to play
+static u32           g_buf_span[NBUF];         // book time it covers (differs from g_buf_dur when the speed is not 100%)
+static u16           g_buf_peak[NBUF][2];      // peak level of the buffer, for the VU meters
+
+static volatile int  g_speed_pct = 100;        // playback speed, 80..150
+static volatile int  g_loud = 0;               // 0 off, 1 = +3 dB, 2 = +6 dB
+static Wsola        *g_ws;                     // time stretcher, created on demand
+static u32           g_ws_rate, g_ws_ch;
+static s16           g_scr[BUF_CAP * 2];       // one decoded frame converted to the output channel layout
 
 static volatile u64  g_last_ms;       // end of the most recently queued audio / seek target
 static u64           g_anchor_ms = (u64)-1;
@@ -119,6 +128,35 @@ static u32 append_pcm(s16 *out, u32 have, const s16 *in, u32 nf, u32 in_ch) {
     return nf;
 }
 
+// Loudness boost with a soft limiter (so +6 dB on a loud passage rounds off instead of clipping) and the VU peak.
+static void apply_gain_and_peak(int idx, u32 frames) {
+    s16 *p = g_pcm[idx];
+    u32 n = frames * g_channels;
+    int loud = g_loud;
+    int g = loud == 1 ? 362 : (loud == 2 ? 512 : 256);            // Q8: 1.0 / 1.414 / 2.0
+    int pk[2] = {0, 0};
+    for (u32 i = 0; i < n; i++) {
+        int v = p[i];
+        if (g != 256) {
+            v = (v * g) >> 8;
+            int a = v < 0 ? -v : v;
+            if (a > 22000) {                                      // knee: asymptotically approaches full scale
+                int ex = a - 22000;
+                a = 22000 + (ex * 10767) / (ex + 10767);
+                v = v < 0 ? -a : a;
+            }
+            if (v > 32767) v = 32767;
+            if (v < -32768) v = -32768;
+            p[i] = (s16)v;
+        }
+        int a = v < 0 ? -v : v;
+        int c = (g_channels == 2) ? (int)(i & 1) : 0;
+        if (a > pk[c]) pk[c] = a;
+    }
+    g_buf_peak[idx][0] = (u16)pk[0];
+    g_buf_peak[idx][1] = (u16)(g_channels == 2 ? pk[1] : pk[0]);
+}
+
 // Called with g_lock held. Returns 1 if a buffer was queued.
 static int fill_one_buffer(void) {
     int idx = -1;
@@ -135,7 +173,30 @@ static int fill_one_buffer(void) {
     bool first = g_warm < 2;
     u64 t0 = svcGetSystemTick();
     if (g_logged == 0) { g_logged = 1; nlog("audio thread: first decode starting"); }
+    int speed = g_speed_pct;
+    bool stretch = speed != 100;
+    if (stretch && (!g_ws || g_ws_rate != g_rate || g_ws_ch != g_channels) && !g_need_format) {
+        if (g_ws) wsola_free(g_ws);
+        g_ws = wsola_new((int)g_rate, (int)g_channels);
+        g_ws_rate = g_rate; g_ws_ch = g_channels;
+    }
+    if (stretch && !g_ws && !g_need_format) stretch = false;        // out of memory: play at normal speed
+    if (stretch) wsola_set_speed(g_ws, (float)speed / 100.0f);
+    bool ws_run = false;                                            // this buffer is being filled from the stretcher
+    double src_first = 0, src_last = 0;
+    u32 n_last = 0;
     while (frames < target && !g_eof && !(g_want && frames > 0)) {
+        if (stretch) {                                              // drain what the stretcher already has first
+            double src;
+            int n = wsola_pull(g_ws, g_pcm[idx] + (size_t)frames * g_channels, (int)(BUF_CAP - frames), &src);
+            if (n > 0) {
+                if (frames == 0) { src_first = src; g_buf_ms[idx] = (u64)src; }
+                src_last = src; n_last = (u32)n;
+                frames += (u32)n;
+                ws_run = true;
+                continue;
+            }
+        }
         if (g_cur.sample >= t->nsamples) { g_eof = true; break; }
         u32 smp = g_cur.sample, len = 0;
         int rc = m4b_read(&g_mp4, t, &g_cur, g_sbuf, SBUF_SIZE, &len);
@@ -166,13 +227,27 @@ static int fill_one_buffer(void) {
         if (g_discard > 0) { g_discard--; continue; }
         u32 nf = (u32)fi.samples / fi.channels;
         if (nf == 0) continue;
+        if (stretch) {
+            if (nf > BUF_CAP) nf = BUF_CAP;
+            append_pcm(g_scr, 0, (const s16 *)pcm, nf, fi.channels);
+            wsola_push(g_ws, g_scr, (int)nf, (double)m4b_sample_to_ms(t, smp));
+            continue;
+        }
         if (frames == 0) g_buf_ms[idx] = m4b_sample_to_ms(t, smp);
         frames += append_pcm(g_pcm[idx], frames, (const s16 *)pcm, nf, fi.channels);
     }
     if (frames == 0) return 0;
 
     g_buf_dur[idx] = (u32)((u64)frames * 1000 / g_rate);
-    g_last_ms = g_buf_ms[idx] + g_buf_dur[idx];
+    if (ws_run) {
+        // book time covered = from the first output frame's source time to the end of the last hop
+        double span = (src_last - src_first) + (double)n_last * 1000.0 * (double)speed / 100.0 / (double)g_rate;
+        g_buf_span[idx] = span < 1 ? 1 : (u32)span;
+    } else {
+        g_buf_span[idx] = g_buf_dur[idx];
+    }
+    g_last_ms = g_buf_ms[idx] + g_buf_span[idx];
+    apply_gain_and_peak(idx, frames);
 
     // decode-load statistics (what fraction of real time we spend decoding)
     u64 us = (svcGetSystemTick() - t0) * 1000000ULL / SYSCLOCK_ARM11;
@@ -274,6 +349,7 @@ void player_exit(void) {
     threadFree(g_thread);
     for (int i = 0; i < NBUF; i++) if (g_pcm[i]) linearFree(g_pcm[i]);
     free(g_sbuf);
+    if (g_ws) { wsola_free(g_ws); g_ws = NULL; }
     ndspExit();
     g_ready = false;
 }
@@ -287,6 +363,7 @@ void player_close(void) {
         ndspChnWaveBufClear(0);
         ndspChnReset(0);
         if (g_dec) { NeAACDecClose(g_dec); g_dec = NULL; }
+        if (g_ws) { wsola_free(g_ws); g_ws = NULL; }
         m4b_close(&g_mp4);
         g_open = false;
     }
@@ -363,14 +440,18 @@ const M4b *player_book(void) { return g_open ? &g_mp4 : NULL; }
 
 uint64_t player_duration_ms(void) { return g_open ? g_mp4.duration_ms : 0; }
 
+static int g_cur_idx = -1;
+
 static void current_base(u64 *base, u32 *dur, bool *playing_buf) {
     *base = g_last_ms;
     *dur = 0;
     *playing_buf = false;
+    g_cur_idx = -1;
     for (int i = 0; i < NBUF; i++) {
         if (g_wb[i].status == NDSP_WBUF_PLAYING) {
             *base = g_buf_ms[i];
             *dur = g_buf_dur[i];
+            g_cur_idx = i;
             *playing_buf = true;
             return;
         }
@@ -397,7 +478,7 @@ uint64_t player_position_ms(void) {
     } else {
         elapsed = g_frozen_elapsed;
     }
-    u64 pos = base + elapsed;
+    u64 pos = base + ((pb && dur && g_cur_idx >= 0 && g_buf_span[g_cur_idx] != dur) ? elapsed * g_buf_span[g_cur_idx] / dur : elapsed);
     return pos > g_mp4.duration_ms ? g_mp4.duration_ms : pos;
 }
 
@@ -458,6 +539,7 @@ void player_seek_ms(uint64_t ms) {
         g_eof = false;
         g_errs = 0;
     }
+    if (g_ws) wsola_reset(g_ws);
     ndspChnWaveBufClear(0);
     setup_channel();
     ndspChnSetPaused(0, !g_playing);
@@ -468,6 +550,30 @@ void player_seek_ms(uint64_t ms) {
     reset_position_tracking();
     if (g_playing) g_anchor_time = osGetTime();
     LightLock_Unlock(&g_lock);
+}
+
+void player_autochap(int minutes) {
+    if (!g_open || minutes <= 0) return;
+    lock_player();
+    int n = m4b_synth_chapters(&g_mp4, (uint64_t)minutes * 60000ull);
+    if (n) nlog("auto chapters: %d parts of %d min", n, minutes);
+    LightLock_Unlock(&g_lock);
+}
+
+void player_set_speed(int pct) { g_speed_pct = pct < 80 ? 80 : (pct > 150 ? 150 : pct); }
+int  player_get_speed(void) { return g_speed_pct; }
+void player_set_loud(int mode) { g_loud = mode < 0 ? 0 : (mode > 2 ? 2 : mode); }
+
+void player_get_level(float *l, float *r) {
+    *l = *r = 0;
+    if (!g_open || !g_playing) return;
+    u64 base;
+    u32 dur;
+    bool pb;
+    current_base(&base, &dur, &pb);
+    if (g_cur_idx < 0) return;
+    *l = g_buf_peak[g_cur_idx][0] / 32768.0f;
+    *r = g_buf_peak[g_cur_idx][1] / 32768.0f;
 }
 
 void player_set_volume(float v) {

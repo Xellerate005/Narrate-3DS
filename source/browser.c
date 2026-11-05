@@ -193,7 +193,7 @@ typedef struct { int books, done; double sum; } Scan;
 static bool entry_is_dir(const char *dir, struct dirent *e) {
     if (e->d_type == DT_DIR) return true;
     if (e->d_type == DT_REG) return false;
-    char full[800];
+    char full[1100];
     struct stat st;
     snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
     return stat(full, &st) == 0 && S_ISDIR(st.st_mode);

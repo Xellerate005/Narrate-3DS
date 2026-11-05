@@ -32,6 +32,7 @@ void ui_end(void);
 void ui_scene(C3D_RenderTarget *t);          // clears / paints the themed background
 void ui_glow(float w, float h);              // accent glow at the top (only for styles that use it)
 
+void  ui_set_font(C2D_Font f);                // custom theme font (NULL = the system font)
 void ui_set_accent(u8 r, u8 g, u8 b);        // "auto" accent (from cover art)
 void ui_set_accent_hue(float hue);
 

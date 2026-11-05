@@ -1,5 +1,6 @@
 // bookmarks.c - text database: "<pos_ms>|<label>|<path>" per line
 #include "bookmarks.h"
+#include "iowork.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,11 +41,15 @@ static Ent *push(const char *path, uint64_t pos, const char *label) {
 }
 
 static void save(void) {
-    FILE *f = fopen(BM_FILE, "w");
-    if (!f) return;
+    size_t total = 0;
     for (int i = 0; i < g_n; i++)
-        fprintf(f, "%llu|%s|%s\n", (unsigned long long)g_e[i].pos, g_e[i].label, g_e[i].path);
-    fclose(f);
+        total += (size_t)snprintf(NULL, 0, "%llu|%s|%s\n", (unsigned long long)g_e[i].pos, g_e[i].label, g_e[i].path);
+    char *buf = (char *)malloc(total + 1);
+    if (!buf) return;
+    size_t off = 0;
+    for (int i = 0; i < g_n; i++)
+        off += (size_t)snprintf(buf + off, total + 1 - off, "%llu|%s|%s\n", (unsigned long long)g_e[i].pos, g_e[i].label, g_e[i].path);
+    iowork_write(BM_FILE, "w", buf, off);
 }
 
 void bm_load(void) {

@@ -1,5 +1,6 @@
 // progress.c - tiny text database: "<pos_ms>|<dur_ms>|<last_played_unix>|<path>" per line
 #include "progress.h"
+#include "iowork.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -100,13 +101,18 @@ int progress_state(const char *path, float *frac) {
 
 void progress_save(void) {
     if (!g_dirty) return;
-    FILE *f = fopen(PROGRESS_FILE, "w");
-    if (!f) return;
+    size_t total = 0;
     for (int i = 0; i < g_n; i++)
-        fprintf(f, "%llu|%llu|%llu|%s\n", (unsigned long long)g_e[i].pos, (unsigned long long)g_e[i].dur,
-                (unsigned long long)g_e[i].ts, g_e[i].path);
-    fclose(f);
+        total += (size_t)snprintf(NULL, 0, "%llu|%llu|%llu|%s\n", (unsigned long long)g_e[i].pos, (unsigned long long)g_e[i].dur,
+                                  (unsigned long long)g_e[i].ts, g_e[i].path);
+    char *buf = (char *)malloc(total + 1);
+    if (!buf) return;
+    size_t off = 0;
+    for (int i = 0; i < g_n; i++)
+        off += (size_t)snprintf(buf + off, total + 1 - off, "%llu|%llu|%llu|%s\n", (unsigned long long)g_e[i].pos,
+                                (unsigned long long)g_e[i].dur, (unsigned long long)g_e[i].ts, g_e[i].path);
     g_dirty = false;
+    iowork_write(PROGRESS_FILE, "w", buf, off);
 }
 
 void progress_set_last(const char *path) {

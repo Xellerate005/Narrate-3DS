@@ -144,16 +144,16 @@ static inline u32 morton_offset(u32 x, u32 y) {
     return (x & 1) | ((y & 1) << 1) | ((x & 2) << 1) | ((y & 2) << 2) | ((x & 4) << 2) | ((y & 4) << 3);
 }
 
-// rgba: size*size*4 bytes (R,G,B,A), top-down. Creates a swizzled GPU texture.
-bool cover_tex_from_rgba(C3D_Tex *tex, int size, const uint8_t *rgba) {
-    if (!C3D_TexInit(tex, (u16)size, (u16)size, GPU_RGBA8)) return false;
+// rgba: w*h*4 bytes (R,G,B,A), top-down; w and h must be multiples of 8 (powers of two for the GPU).
+bool cover_tex_from_rgba_wh(C3D_Tex *tex, int w, int h, const uint8_t *rgba) {
+    if (!C3D_TexInit(tex, (u16)w, (u16)h, GPU_RGBA8)) return false;
     u32 *dst = (u32 *)tex->data;
-    for (int y = 0; y < size; y++) {
-        u32 ty = COVER_FLIP ? (u32)(size - 1 - y) : (u32)y;
-        for (int x = 0; x < size; x++) {
-            const u8 *p = rgba + ((size_t)y * size + x) * 4;
-            u32 px = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | 0xFF;
-            dst[(((ty >> 3) * (u32)(size >> 3) + ((u32)x >> 3)) << 6) + morton_offset((u32)x, ty)] = px;
+    for (int y = 0; y < h; y++) {
+        u32 ty = COVER_FLIP ? (u32)(h - 1 - y) : (u32)y;
+        for (int x = 0; x < w; x++) {
+            const u8 *p = rgba + ((size_t)y * w + x) * 4;
+            u32 px = ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | (u32)p[3];
+            dst[(((ty >> 3) * (u32)(w >> 3) + ((u32)x >> 3)) << 6) + morton_offset((u32)x, ty)] = px;
         }
     }
     C3D_TexFlush(tex);
@@ -161,6 +161,8 @@ bool cover_tex_from_rgba(C3D_Tex *tex, int size, const uint8_t *rgba) {
     C3D_TexSetWrap(tex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
     return true;
 }
+
+bool cover_tex_from_rgba(C3D_Tex *tex, int size, const uint8_t *rgba) { return cover_tex_from_rgba_wh(tex, size, size, rgba); }
 
 bool cover_load(const uint8_t *data, uint32_t len, const char *book_path) {
     cover_free();

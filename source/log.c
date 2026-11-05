@@ -1,4 +1,6 @@
 #include "log.h"
+#include "iowork.h"
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -19,4 +21,17 @@ void nlog(const char *fmt, ...) {
     va_end(ap);
     fputc('\n', f);
     fclose(f);
+}
+
+void nlog_async(const char *fmt, ...) {
+    char *buf = (char *)malloc(300);
+    if (!buf) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, 299, fmt, ap);
+    va_end(ap);
+    if (n < 0) { free(buf); return; }
+    if (n > 298) n = 298;
+    buf[n++] = '\n';
+    iowork_write(LOG_FILE, "a", buf, (size_t)n);
 }

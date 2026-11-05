@@ -1,15 +1,19 @@
 // theme.c
 #include "theme.h"
+#include "custom.h"
+#include "iowork.h"
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #define SETTINGS_FILE "sdmc:/3ds/narrate/settings.cfg"
 #define RGB(h) C2D_Color32(((h) >> 16) & 255, ((h) >> 8) & 255, (h) & 255, 255)
 
-//                        style dark acc icons sb sf cflip crot layout view anim auto lid sort bright
-Settings g_set = {0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1};
+//                        style dark acc icons sb sf cflip crot layout view anim auto lid sort bright rewind dim loud autochap speed custom
+Settings g_set = {0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, -1, 1, 0, 0, 2, 100, ""};
 const UiStyle *ui_style;
 UiPal ui_pal;
 u32 ui_accent, ui_accent_dim, ui_accent_soft;
@@ -76,19 +80,53 @@ static const StyleDef STYLES[STYLE_COUNT] = {
   /* 16 */ { .st = {.name = "HOME", .r_card = 16, .r_pill = 10, .bar_h = 6, .play_r = 24, .play = PLAY_CIRCLE, .row = ROW_CARD, .tab = TAB_SEG, .bar = BAR_ROUND, .knob = KNOB_CIRCLE, .btn = BTN_FILLED, .def_layout = LAY_CLASSIC},
             .dark = {0x1C2026, 0x2A3038, 0x363E48, 0xF2F6FA, 0x98A4B2, 0x3F4852, 0x49B6E8},
             .light = {0xE6E8EB, 0xFFFFFF, 0xD5D9DE, 0x2B2F36, 0x5C6670, 0xC3C9D0, 0x0A78B8} },
+  /* 17 */ { .st = {.name = "Amp", .r_card = 6, .r_pill = 6, .bar_h = 5, .play_r = 8, .play = PLAY_SQUIRCLE, .row = ROW_CARD, .tab = TAB_PILL, .bar = BAR_LINE, .knob = KNOB_PILL, .btn = BTN_FILLED, .def_layout = LAY_AMP},
+            .dark = {0x1A120C, 0x2B1D12, 0x3D2A1B, 0xF3E3C8, 0xA88E6B, 0x4F3A26, 0xFFB84D},
+            .light = {0xE8D9BE, 0xF4E8D0, 0xD9C6A3, 0x2B1D12, 0x7A6446, 0xC9B48A, 0xB8741A} },
+  /* 18 */ { .st = {.name = "Book", .r_card = 10, .r_pill = 10, .bar_h = 4, .play_r = 24, .play = PLAY_CIRCLE, .row = ROW_FLAT, .tab = TAB_UNDERLINE, .bar = BAR_LINE, .knob = KNOB_CIRCLE, .btn = BTN_FILLED, .def_layout = LAY_BOOK},
+            .dark = {0x14100C, 0x221B14, 0x322819, 0xEFE6D2, 0xA39880, 0x463A29, 0xC9A24A},
+            .light = {0xF2EAD8, 0xFBF6EA, 0xE0D3B8, 0x2A2218, 0x7B6D55, 0xD3C4A3, 0x9A6B1E} },
+  /* 19 */ { .st = {.name = "Journey", .r_card = 14, .r_pill = -1, .bar_h = 6, .play_r = 24, .play = PLAY_CIRCLE, .row = ROW_PILL, .tab = TAB_PILL, .bar = BAR_ROUND, .knob = KNOB_CIRCLE, .btn = BTN_FILLED, .def_layout = LAY_JOURNEY},
+            .dark = {0x0F1B2E, 0x1A2B45, 0x26405F, 0xF2F6FF, 0x93A8C7, 0x34506F, 0xFFB347},
+            .light = {0xDCEBFA, 0xF4F9FF, 0xC5DDF3, 0x14233A, 0x5B7391, 0xB2CCE6, 0xE07A1F} },
+  /* 20 */ { .st = {.name = "Campfire", .r_card = 12, .r_pill = 12, .bar_h = 5, .play_r = 24, .play = PLAY_CIRCLE, .row = ROW_CARD, .tab = TAB_PILL, .bar = BAR_ROUND, .knob = KNOB_GLOW, .btn = BTN_FILLED, .def_layout = LAY_CAMPFIRE},
+            .dark = {0x0E0806, 0x1E120D, 0x2E1B13, 0xF6E3CF, 0xB0907A, 0x4A2E20, 0xFF8A2B},
+            .light = {0xF4E6D6, 0xFBF1E4, 0xE4CDB2, 0x3A1E10, 0x876650, 0xD8BE9F, 0xD2561A} },
+  /* 21 */ { .st = {.name = "Night Sky", .r_card = 14, .r_pill = -1, .bar_h = 3, .play_r = 24, .play = PLAY_OUTLINE_CIRCLE, .row = ROW_FLAT, .tab = TAB_UNDERLINE, .bar = BAR_LINE, .knob = KNOB_GLOW, .btn = BTN_OUTLINE, .glow = true, .def_layout = LAY_NIGHTSKY},
+            .dark = {0x050816, 0x0E1430, 0x18214A, 0xE8ECFF, 0x7F8CB8, 0x232C5A, 0xB8C4FF},
+            .light = {0xE6EAFB, 0xF6F8FF, 0xCDD5F2, 0x141A3A, 0x5A66A0, 0xBAC4EA, 0x4B5BD6} },
+  /* 22 */ { .st = {.name = "Aquarium", .r_card = 16, .r_pill = -1, .bar_h = 6, .play_r = 24, .play = PLAY_CIRCLE, .row = ROW_PILL, .tab = TAB_PILL, .bar = BAR_ROUND, .knob = KNOB_CIRCLE, .btn = BTN_FILLED, .def_layout = LAY_AQUARIUM},
+            .dark = {0x06222E, 0x0C3345, 0x134660, 0xE6F9FF, 0x7FB5C8, 0x1B5670, 0x4FE0D0},
+            .light = {0xD9F2F7, 0xF0FBFD, 0xBEE3EC, 0x0B2F3E, 0x4F8396, 0xA7D2DE, 0x0E9AA8} },
+  /* 23 */ { .st = {.name = "CRT", .r_card = 0, .r_pill = 0, .bar_h = 8, .play_r = 0, .play = PLAY_SQUARE, .row = ROW_INVERT, .tab = TAB_BRACKET, .bar = BAR_SEGMENTS, .knob = KNOB_NONE, .btn = BTN_OUTLINE, .outline = true, .def_layout = LAY_CRT},
+            .dark = {0x020A04, 0x051A0A, 0x0A2C12, 0x5CFF7A, 0x2FA84A, 0x1B6B2C, 0x7DFF94},
+            .light = {0xD8E8C8, 0xC9DDB6, 0xB6CFA0, 0x17400F, 0x3F6B2F, 0x5E8B4A, 0x17400F} },
 };
 
 static const char *ACCENT_NAMES[ACCENT_COUNT] = {
     "Auto (cover)", "Style default", "Blue", "Teal", "Green", "Lime", "Amber", "Orange", "Red", "Pink", "Purple", "Mono"};
 static const unsigned PRESETS[9] = {0x3D8BFF, 0x2DD4BF, 0x4ADE80, 0xA3E635, 0xFBBF24, 0xFB923C, 0xF87171, 0xF472B6, 0xA78BFA};
 static const char *LAYOUT_NAMES[LAY_COUNT + 1] = {
-    "Style default", "Classic", "Big buttons", "Night", "Zen", "Cassette", "Vinyl", "Reel-to-reel", "Quest log"};
+    "Style default", "Classic", "Big buttons", "Night", "Zen", "Cassette", "Vinyl", "Reel-to-reel", "Quest log",
+    "Amp (VU meters)", "Open book", "Journey", "Campfire", "Night sky", "Aquarium", "CRT terminal"};
 static const char *VIEW_NAMES[3] = {"Style default", "List", "Shelf"};
 
 const char *theme_style_name(int i) { return STYLES[(i >= 0 && i < STYLE_COUNT) ? i : 0].st.name; }
 const char *theme_accent_name(int i) { return ACCENT_NAMES[(i >= 0 && i < ACCENT_COUNT) ? i : 0]; }
 const char *theme_layout_name(int s) { return LAYOUT_NAMES[(s >= 0 && s <= LAY_COUNT) ? s : 0]; }
 const char *theme_view_name(int s) { return VIEW_NAMES[(s >= 0 && s <= 2) ? s : 0]; }
+
+int theme_style_by_name(const char *name) {
+    for (int i = 0; i < STYLE_COUNT; i++) if (!strcasecmp(STYLES[i].st.name, name)) return i;
+    return -1;
+}
+
+int theme_layout_by_name(const char *name) {
+    static const char *N[LAY_COUNT] = {"classic", "big", "night", "zen", "cassette", "vinyl", "reel", "quest",
+                                       "amp", "book", "journey", "campfire", "nightsky", "aquarium", "crt"};
+    for (int i = 0; i < LAY_COUNT; i++) if (!strcasecmp(N[i], name)) return i;
+    return -1;
+}
 
 int theme_layout(void) {
     int v = g_set.layout;
@@ -144,6 +182,8 @@ void theme_set_auto_accent(u8 r, u8 g, u8 b) {
 
 static int clampi(int v, int lo, int hi, int def) { return (v < lo || v > hi) ? def : v; }
 
+static UiStyle g_cust_style;           // mutable copy of the base style while a custom theme is active
+
 void theme_apply(void) {
     g_set.style = clampi(g_set.style, 0, STYLE_COUNT - 1, 0);
     g_set.accent = clampi(g_set.accent, 0, ACCENT_COUNT - 1, 0);
@@ -154,20 +194,35 @@ void theme_apply(void) {
     g_set.cover_rot = clampi(g_set.cover_rot, 0, 3, 0);
     g_set.layout = clampi(g_set.layout, 0, LAY_COUNT, 0);
     g_set.libview = clampi(g_set.libview, 0, 2, 0);
-    g_set.anim = g_set.anim ? 1 : 0;
+    g_set.anim = clampi(g_set.anim, 0, 4, 1);          // 0 off, 1 auto, 2 = 15 fps, 3 = 30 fps, 4 = 60 fps
     g_set.autocont = g_set.autocont ? 1 : 0;
     g_set.lidplay = g_set.lidplay ? 1 : 0;
     g_set.sort = clampi(g_set.sort, 0, 2, 0);
+    g_set.smartrewind = g_set.smartrewind ? 1 : 0;
+    g_set.dim_after = clampi(g_set.dim_after, 0, 4, 0);
+    g_set.loud = clampi(g_set.loud, 0, 2, 0);
+    g_set.autochap = clampi(g_set.autochap, 0, 4, 2);
+    g_set.speed = clampi(g_set.speed, 80, 150, 100);
     if (g_set.bright < -1 || g_set.bright > 100) g_set.bright = -1;
 
-    const StyleDef *sd = &STYLES[g_set.style];
+    // A custom theme can inherit its shapes/behaviour from any built-in style.
+    int style_idx = g_set.style;
+    bool custom = custom_active();
+    if (custom) {
+        int b = custom_base_style();
+        if (b >= 0 && b < STYLE_COUNT) style_idx = b;
+    }
+    const StyleDef *sd = &STYLES[style_idx];
     ui_style = &sd->st;
+    if (custom) {
+        g_cust_style = sd->st;
+        custom_patch_style(&g_cust_style);
+        ui_style = &g_cust_style;
+    }
     const Base *bp = g_set.dark ? &sd->dark : &sd->light;
 
     u8 r, g, b;
-    resolve_accent(g_set.accent, g_set.dark, g_set.style, &r, &g, &b);
-    ui_ar = r; ui_ag = g; ui_ab = b;
-    ui_accent = C2D_Color32(r, g, b, 255);
+    resolve_accent(g_set.accent, g_set.dark, style_idx, &r, &g, &b);
 
     ui_pal.bg = RGB(bp->bg);
     ui_pal.bg2 = ui_pal.bg;
@@ -178,7 +233,19 @@ void theme_apply(void) {
     ui_pal.line = RGB(bp->line);
     ui_pal.error = g_set.dark ? RGB(0xFF6B6B) : RGB(0xD92D2D);
 
-    if (ui_style->gradient) {                   // gradient backgrounds with frosted cards
+    bool on_set = false;
+    if (custom) {
+        bool acc_set = false;
+        u32 acc = 0;
+        custom_patch_palette(&ui_pal, g_set.dark, &acc_set, &acc, &on_set);
+        if (acc_set && (g_set.accent == 0 || g_set.accent == 1)) {       // the theme's accent unless you picked a colour yourself
+            r = acc & 255; g = (acc >> 8) & 255; b = (acc >> 16) & 255;
+        }
+    }
+    ui_ar = r; ui_ag = g; ui_ab = b;
+    ui_accent = C2D_Color32(r, g, b, 255);
+
+    if (ui_style->gradient == GRAD_AURORA || ui_style->gradient == GRAD_SYNTH) {    // gradient backgrounds with frosted cards
         u32 white = RGB(0xFFFFFF);
         if (ui_style->gradient == GRAD_AURORA) {
             if (g_set.dark) {
@@ -208,13 +275,15 @@ void theme_apply(void) {
         ui_pal.line = theme_mix(mid, ui_pal.text, 0.20f);
     }
 
-    float lum = lum_of(ui_accent);
-    if (ui_style->gradient) {
-        ui_pal.on_accent = lum > 0.55f ? RGB(0x0B0D12) : RGB(0xFFFFFF);
-    } else {
-        // use whichever of the style's own background / text colours contrasts most with the accent
-        float lb = lum_of(ui_pal.bg), lt = lum_of(ui_pal.text);
-        ui_pal.on_accent = fabsf(lum - lb) >= fabsf(lum - lt) ? ui_pal.bg : ui_pal.text;
+    if (!on_set) {
+        float lum = lum_of(ui_accent);
+        if (ui_style->gradient == GRAD_AURORA || ui_style->gradient == GRAD_SYNTH) {
+            ui_pal.on_accent = lum > 0.55f ? RGB(0x0B0D12) : RGB(0xFFFFFF);
+        } else {
+            // use whichever of the style's own background / text colours contrasts most with the accent
+            float lb = lum_of(ui_pal.bg), lt = lum_of(ui_pal.text);
+            ui_pal.on_accent = fabsf(lum - lb) >= fabsf(lum - lt) ? ui_pal.bg : ui_pal.text;
+        }
     }
 
     ui_accent_dim = theme_mix(ui_accent, ui_pal.bg, 0.55f);
@@ -225,7 +294,7 @@ void theme_apply(void) {
 void theme_load(void) {
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (f) {
-        char line[96];
+        char line[160];
         while (fgets(line, sizeof line, f)) {
             int v;
             if (sscanf(line, "style=%d", &v) == 1) g_set.style = v;
@@ -244,6 +313,16 @@ void theme_load(void) {
             else if (sscanf(line, "lidplay=%d", &v) == 1) g_set.lidplay = v;
             else if (sscanf(line, "sort=%d", &v) == 1) g_set.sort = v;
             else if (sscanf(line, "bright=%d", &v) == 1) g_set.bright = v;
+            else if (sscanf(line, "smartrewind=%d", &v) == 1) g_set.smartrewind = v;
+            else if (sscanf(line, "dim_after=%d", &v) == 1) g_set.dim_after = v;
+            else if (sscanf(line, "loud=%d", &v) == 1) g_set.loud = v;
+            else if (sscanf(line, "autochap=%d", &v) == 1) g_set.autochap = v;
+            else if (sscanf(line, "speed=%d", &v) == 1) g_set.speed = v;
+            else if (strncmp(line, "custom=", 7) == 0) {
+                snprintf(g_set.custom, sizeof g_set.custom, "%s", line + 7);
+                size_t n = strlen(g_set.custom);
+                while (n && (g_set.custom[n - 1] == '\n' || g_set.custom[n - 1] == '\r')) g_set.custom[--n] = 0;
+            }
         }
         fclose(f);
     }
@@ -251,11 +330,15 @@ void theme_load(void) {
 }
 
 void theme_save(void) {
-    FILE *f = fopen(SETTINGS_FILE, "w");
-    if (!f) return;
-    fprintf(f, "style=%d\ndark=%d\naccent=%d\nicons=%d\nskip_back=%d\nskip_fwd=%d\ncover_flip=%d\ncover_rot=%d\n"
-               "layout=%d\nlibview=%d\nanim=%d\nautocont=%d\nlidplay=%d\nsort=%d\nbright=%d\n",
-            g_set.style, g_set.dark, g_set.accent, g_set.icons, g_set.skip_back, g_set.skip_fwd, g_set.cover_flip,
-            g_set.cover_rot, g_set.layout, g_set.libview, g_set.anim, g_set.autocont, g_set.lidplay, g_set.sort, g_set.bright);
-    fclose(f);
+    char *buf = (char *)malloc(768);
+    if (!buf) return;
+    int n = snprintf(buf, 768, "style=%d\ndark=%d\naccent=%d\nicons=%d\nskip_back=%d\nskip_fwd=%d\ncover_flip=%d\ncover_rot=%d\n"
+                               "layout=%d\nlibview=%d\nanim=%d\nautocont=%d\nlidplay=%d\nsort=%d\nbright=%d\n"
+                               "smartrewind=%d\ndim_after=%d\nloud=%d\nautochap=%d\nspeed=%d\ncustom=%s\n",
+                     g_set.style, g_set.dark, g_set.accent, g_set.icons, g_set.skip_back, g_set.skip_fwd, g_set.cover_flip,
+                     g_set.cover_rot, g_set.layout, g_set.libview, g_set.anim, g_set.autocont, g_set.lidplay, g_set.sort, g_set.bright,
+                     g_set.smartrewind, g_set.dim_after, g_set.loud, g_set.autochap, g_set.speed, g_set.custom);
+    if (n < 0) { free(buf); return; }
+    if (n > 767) n = 767;
+    iowork_write(SETTINGS_FILE, "w", buf, (size_t)n);
 }

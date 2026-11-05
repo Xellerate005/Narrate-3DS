@@ -704,3 +704,23 @@ void m4b_close(M4b *m) {
     memset(m, 0, sizeof *m);
     m->audio = -1;
 }
+
+/* Books without chapter marks get one "Part N" every `every_ms`, so skipping and the chapter list stay useful. */
+int m4b_synth_chapters(M4b *m, uint64_t every_ms) {
+    if (m->nchapters > 1 || every_ms < 60000 || m->duration_ms < every_ms * 2) return 0;
+    int n = (int)((m->duration_ms + every_ms - 1) / every_ms);
+    if (n < 2 || n > 2000) return 0;
+    M4bChapter *ch = (M4bChapter *)calloc((size_t)n, sizeof *ch);
+    if (!ch) return 0;
+    for (int i = 0; i < n; i++) {
+        char t[24];
+        snprintf(t, sizeof t, "Part %d", i + 1);
+        ch[i].title = strdup(t);
+        ch[i].start_ms = (uint64_t)i * every_ms;
+        if (!ch[i].title) { for (int j = 0; j < i; j++) free(ch[j].title); free(ch); return 0; }
+    }
+    free_chapters(m);
+    m->chapters = ch;
+    m->nchapters = n;
+    return n;
+}

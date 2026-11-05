@@ -50,4 +50,6 @@ int       m4b_read(M4b *m, M4bTrack *t, M4bCursor *c, uint8_t *buf, uint32_t cap
 
 int       m4b_chapter_at(const M4b *m, uint64_t ms);
 
+int m4b_synth_chapters(M4b *m, uint64_t every_ms);   // only if the book has no chapters; returns the new count
+
 #endif

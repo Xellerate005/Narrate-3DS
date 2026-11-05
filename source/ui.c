@@ -1,5 +1,6 @@
 // ui.c
 #include "ui.h"
+#include "custom.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -8,6 +9,8 @@
 C3D_RenderTarget *ui_top, *ui_bot;
 
 static C2D_TextBuf g_buf, g_tmp;
+static C2D_Font g_font;                 // custom theme font (NULL = system font)
+static uint32_t hash_str(const char *s);
 
 #define Z 0.5f
 
@@ -16,7 +19,7 @@ static C2D_TextBuf g_buf, g_tmp;
 void ui_init(void) {
     ui_top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     ui_bot = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-    g_buf = C2D_TextBufNew(8192);
+    g_buf = C2D_TextBufNew(6144);        // persistent: parsed strings stay valid across frames (see text_get)
     g_tmp = C2D_TextBufNew(1024);
     theme_apply();
 }
@@ -28,7 +31,6 @@ void ui_exit(void) {
 
 void ui_begin(void) {
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
-    C2D_TextBufClear(g_buf);
 }
 
 void ui_end(void) { C3D_FrameEnd(0); }
@@ -119,23 +121,69 @@ void ui_bar(float x, float y, float w, float h, float frac, u32 bg, u32 fg) {
 static float measure(const char *s, float scale) {
     C2D_Text t;
     C2D_TextBufClear(g_tmp);
-    C2D_TextParse(&t, g_tmp, s);
+    if (g_font) C2D_TextFontParse(&t, g_font, g_tmp, s);
+    else C2D_TextParse(&t, g_tmp, s);
     float w = 0, h = 0;
     C2D_TextGetDimensions(&t, scale, scale, &w, &h);
     return w;
 }
 
-float ui_text_w(const char *s, float scale) { return measure(s, scale); }
+// Widths are measured with a parse, so remember recent results (the same labels are measured every frame).
+typedef struct { uint32_t h; uint16_t len; float scale, w; bool used; } WidthEnt;
+#define WIDTH_CACHE 32
+static WidthEnt g_wc[WIDTH_CACHE];
+static int g_wc_next;
+
+float ui_text_w(const char *s, float scale) {
+    if (!s || !*s) return 0;
+    uint32_t h = hash_str(s);
+    uint16_t len = (uint16_t)strlen(s);
+    for (int i = 0; i < WIDTH_CACHE; i++)
+        if (g_wc[i].used && g_wc[i].h == h && g_wc[i].len == len && g_wc[i].scale == scale) return g_wc[i].w;
+    float w = measure(s, scale);
+    WidthEnt *e = &g_wc[g_wc_next];
+    g_wc_next = (g_wc_next + 1) % WIDTH_CACHE;
+    e->used = true; e->h = h; e->len = len; e->scale = scale; e->w = w;
+    return w;
+}
+
+// Parsing + optimising a string (C2D_TextParse / C2D_TextOptimize) is expensive on the old CPU, and the same
+// strings are drawn every frame - so parsed strings are cached in a persistent glyph buffer. When that buffer
+// fills up (e.g. a clock that changes every minute), everything is forgotten and rebuilt on demand.
+typedef struct { uint32_t h; uint16_t len; bool used; C2D_Text t; } TextEnt;
+#define TEXT_CACHE 96
+static TextEnt g_tc[TEXT_CACHE];
+static int g_tc_next;
+
+static const C2D_Text *text_get(const char *s) {
+    char tmp[400];
+    snprintf(tmp, sizeof tmp, "%s", s);
+    uint32_t h = hash_str(tmp);
+    uint16_t len = (uint16_t)strlen(tmp);
+    for (int i = 0; i < TEXT_CACHE; i++)
+        if (g_tc[i].used && g_tc[i].h == h && g_tc[i].len == len) return &g_tc[i].t;
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        TextEnt *e = &g_tc[g_tc_next];
+        if (g_font ? C2D_TextFontParse(&e->t, g_font, g_buf, tmp) : C2D_TextParse(&e->t, g_buf, tmp)) {
+            C2D_TextOptimize(&e->t);
+            e->used = true; e->h = h; e->len = len;
+            g_tc_next = (g_tc_next + 1) % TEXT_CACHE;
+            return &e->t;
+        }
+        C2D_TextBufClear(g_buf);                     // glyph buffer full: start over
+        for (int i = 0; i < TEXT_CACHE; i++) g_tc[i].used = false;
+        g_tc_next = 0;
+    }
+    return NULL;
+}
 
 void ui_text(const char *s, float x, float y, float scale, u32 col, int align) {
     if (!s || !*s) return;
-    char tmp[400];
-    snprintf(tmp, sizeof tmp, "%s", s);
-    C2D_Text t;
-    C2D_TextParse(&t, g_buf, tmp);
-    C2D_TextOptimize(&t);
+    const C2D_Text *t = text_get(s);
+    if (!t) return;
     u32 flags = C2D_WithColor | (align == UI_CENTER ? C2D_AlignCenter : align == UI_RIGHT ? C2D_AlignRight : C2D_AlignLeft);
-    C2D_DrawText(&t, flags, x, y, Z, scale, scale, col);
+    C2D_DrawText(t, flags, x, y, Z, scale, scale, col);
 }
 
 static int utf8_floor(const char *s, int n) {
@@ -485,12 +533,14 @@ static void rect_outline(float x, float y, float w, float h, u32 col) {
 }
 
 void ui_icon_play(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_PLAY, cx, cy, s * 2.2f)) return;
     float lx = cx - s * 0.55f;
     if (ui_icons_outline) tri_outline(lx + 1, cy - s + 1, lx + 1, cy + s - 1, cx + s * 0.9f, cy, col);
     else C2D_DrawTriangle(lx, cy - s, col, lx, cy + s, col, cx + s * 0.95f, cy, col, Z);
 }
 
 void ui_icon_pause(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_PAUSE, cx, cy, s * 2.2f)) return;
     if (ui_icons_outline) {
         rect_outline(cx - s * 0.75f, cy - s, s * 0.55f, s * 2, col);
         rect_outline(cx + s * 0.20f, cy - s, s * 0.55f, s * 2, col);
@@ -501,18 +551,24 @@ void ui_icon_pause(float cx, float cy, float s, u32 col) {
 }
 
 void ui_icon_next(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_NEXT, cx, cy, s * 2.4f)) return;
     if (ui_icons_outline) tri_outline(cx - s, cy - s, cx - s, cy + s, cx + s * 0.55f, cy, col);
     else C2D_DrawTriangle(cx - s, cy - s, col, cx - s, cy + s, col, cx + s * 0.55f, cy, col, Z);
     ui_rect(cx + s * 0.7f, cy - s, s * 0.35f, s * 2, col);
 }
 
 void ui_icon_prev(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_PREV, cx, cy, s * 2.4f)) return;
     ui_rect(cx - s * 1.05f, cy - s, s * 0.35f, s * 2, col);
     if (ui_icons_outline) tri_outline(cx + s, cy - s, cx + s, cy + s, cx - s * 0.55f, cy, col);
     else C2D_DrawTriangle(cx + s, cy - s, col, cx + s, cy + s, col, cx - s * 0.55f, cy, col, Z);
 }
 
 void ui_icon_skip(float cx, float cy, int forward, const char *label) {
+    if (custom_draw_icon(forward ? IC_FWD : IC_BACK, cx, cy - 4, 34)) {          // themed icon + the number below it
+        ui_text(label, cx, cy + 9, 0.38f, ui_pal.text, UI_CENTER);
+        return;
+    }
     ui_round_btn(cx, cy, 22);
     ui_text(label, cx, cy - 15, 0.5f, ui_pal.text, UI_CENTER);
     float d = forward ? 1.0f : -1.0f;
@@ -523,15 +579,18 @@ void ui_icon_skip(float cx, float cy, int forward, const char *label) {
 }
 
 void ui_icon_list(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_CHAPTERS, cx, cy, s * 2.6f)) return;
     for (int i = -1; i <= 1; i++) ui_rrect(cx - s, cy + i * s * 0.7f - 1.2f, s * 2, 2.4f, 1.2f, col);
 }
 
 void ui_icon_moon(float cx, float cy, float r, u32 col, u32 bg) {
+    if (custom_draw_icon(IC_SLEEP, cx, cy, r * 2.6f)) return;
     ui_circle(cx, cy, r, col);
     ui_circle(cx + r * 0.55f, cy - r * 0.35f, r * 0.85f, bg);
 }
 
 void ui_icon_bookmark(float cx, float cy, u32 col, u32 bg) {
+    if (custom_draw_icon(IC_BOOKMARK, cx, cy, 20.0f)) return;
     if (ui_icons_outline) {
         float l = cx - 5, r = cx + 5, t = cy - 8, b = cy + 8;
         ui_line(l, t, r, t, ICON_T, col);
@@ -546,17 +605,20 @@ void ui_icon_bookmark(float cx, float cy, u32 col, u32 bg) {
 }
 
 void ui_icon_close(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_CLOSE, cx, cy, s * 2.4f)) return;
     ui_line(cx - s, cy - s, cx + s, cy + s, 2.2f, col);
     ui_line(cx - s, cy + s, cx + s, cy - s, 2.2f, col);
 }
 
 void ui_icon_screen(float cx, float cy, u32 col, u32 bg) {
+    if (custom_draw_icon(IC_SCREEN_OFF, cx, cy, 22.0f)) return;
     ui_rrect(cx - 9, cy - 7, 18, 13, 3, col);
     ui_rect(cx - 7, cy - 5, 14, 9, bg);
     ui_line(cx - 10, cy + 8, cx + 10, cy - 9, 2.2f, col);
 }
 
 void ui_icon_gear(float cx, float cy, u32 col, u32 bg) {
+    if (custom_draw_icon(IC_SETTINGS, cx, cy, 22.0f)) return;
     ui_circle(cx, cy, 6.5f, col);
     for (int i = 0; i < 8; i++) {
         float a = (float)i * 0.785398f;
@@ -566,6 +628,7 @@ void ui_icon_gear(float cx, float cy, u32 col, u32 bg) {
 }
 
 void ui_icon_sun(float cx, float cy, float r, u32 col) {
+    if (custom_draw_icon(IC_SUN, cx, cy, r * 2.6f)) return;
     ui_circle(cx, cy, r * 0.5f, col);
     for (int i = 0; i < 8; i++) {
         float a = (float)i * 0.785398f;
@@ -574,22 +637,26 @@ void ui_icon_sun(float cx, float cy, float r, u32 col) {
 }
 
 void ui_icon_sort(float cx, float cy, u32 col) {
+    if (custom_draw_icon(IC_SORT, cx, cy, 18.0f)) return;
     ui_rrect(cx - 8, cy - 6, 16, 2.6f, 1.3f, col);
     ui_rrect(cx - 8, cy - 1.3f, 11, 2.6f, 1.3f, col);
     ui_rrect(cx - 8, cy + 3.4f, 6, 2.6f, 1.3f, col);
 }
 
 void ui_icon_check(float cx, float cy, float s, u32 col) {
+    if (custom_draw_icon(IC_CHECK, cx, cy, s * 2.2f)) return;
     ui_line(cx - s * 0.9f, cy, cx - s * 0.25f, cy + s * 0.65f, 2.4f, col);
     ui_line(cx - s * 0.25f, cy + s * 0.65f, cx + s * 0.95f, cy - s * 0.7f, 2.4f, col);
 }
 
 void ui_icon_folder(float cx, float cy, u32 col) {
+    if (custom_draw_icon(IC_FOLDER, cx, cy, 22.0f)) return;
     ui_rrect(cx - 9, cy - 7, 8, 5, 2, col);
     ui_rrect(cx - 9, cy - 4, 18, 12, 3, col);
 }
 
 void ui_icon_book(float cx, float cy, u32 col, u32 bg) {
+    if (custom_draw_icon(IC_BOOK, cx, cy, 22.0f)) return;
     ui_rrect(cx - 7, cy - 9, 14, 18, 3, col);
     ui_rect(cx - 4, cy - 5, 8, 2, bg);
     ui_rect(cx - 4, cy - 1, 6, 2, bg);
@@ -600,4 +667,15 @@ void ui_fmt_time(char *buf, size_t n, uint64_t ms, int force_hours) {
     unsigned h = (unsigned)(s / 3600), m = (unsigned)((s / 60) % 60), sec = (unsigned)(s % 60);
     if (h || force_hours) snprintf(buf, n, "%u:%02u:%02u", h, m, sec);
     else snprintf(buf, n, "%u:%02u", m, sec);
+}
+
+// Switch the font used for all text (NULL = the system font) and forget everything measured with the old one.
+void ui_set_font(C2D_Font f) {
+    g_font = f;
+    C2D_TextBufClear(g_buf);
+    for (int i = 0; i < TEXT_CACHE; i++) g_tc[i].used = false;
+    g_tc_next = 0;
+    for (int i = 0; i < WIDTH_CACHE; i++) g_wc[i].used = false;
+    for (int i = 0; i < FIT_CACHE; i++) g_fit[i].used = false;
+    for (int i = 0; i < WRAP_CACHE; i++) g_wrap[i].used = false;
 }

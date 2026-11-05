@@ -16,5 +16,6 @@ void cover_draw_image(const C2D_Image *img, float x, float y, float size);   // 
 void cover_set_orient(int flip, int rot);                             // flip 0..3 (none/vertical/horizontal/both), rot 0..3 (x90 degrees)
 bool cover_accent(u8 *r, u8 *g, u8 *b);                               // dominant colour, boosted; false if cover is grey
 bool cover_tex_from_rgba(C3D_Tex *tex, int size, const uint8_t *rgba);
+bool cover_tex_from_rgba_wh(C3D_Tex *tex, int w, int h, const uint8_t *rgba);   // keeps the alpha channel (theme images)
 
 #endif
